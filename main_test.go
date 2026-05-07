@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
@@ -131,12 +132,15 @@ func TestResolveStoreLocationHereCreatesFile(t *testing.T) {
 	}()
 
 	localPath := filepath.Join(tempDir, ".todos")
+	if err := saveStore(localPath, store{}); err != nil {
+		t.Fatalf("save local store: %v", err)
+	}
 	location, err := resolveStoreLocation(storageHere)
 	if err != nil {
 		t.Fatalf("resolveStoreLocation: %v", err)
 	}
-	if !location.Created {
-		t.Fatal("expected local store to be marked as created")
+	if location.Created {
+		t.Fatal("expected existing local store not to be marked as created")
 	}
 	if canonicalPath(t, location.Path) != canonicalPath(t, localPath) {
 		t.Fatalf("expected local path %q, got %q", localPath, location.Path)
@@ -144,11 +148,8 @@ func TestResolveStoreLocationHereCreatesFile(t *testing.T) {
 	if _, err := os.Stat(localPath); err != nil {
 		t.Fatalf("expected local file to exist: %v", err)
 	}
-	if !strings.Contains(location.Notice, "Created") {
-		t.Fatalf("expected creation notice, got %q", location.Notice)
-	}
-	if !strings.Contains(location.Notice, "file.") {
-		t.Fatalf("expected clearer creation notice, got %q", location.Notice)
+	if location.Notice != "" {
+		t.Fatalf("expected no creation notice for existing store, got %q", location.Notice)
 	}
 
 	s, loadedLocation, err := loadStore(storageHere)
@@ -160,6 +161,64 @@ func TestResolveStoreLocationHereCreatesFile(t *testing.T) {
 	}
 	if loadedLocation.Scope != storeScopeLocal {
 		t.Fatalf("expected local scope, got %v", loadedLocation.Scope)
+	}
+}
+
+func TestConfirmLocalStoreCreationIfNeededAcceptsCreation(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	tempDir := t.TempDir()
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatalf("chdir temp dir: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(wd)
+	}()
+
+	var out bytes.Buffer
+	if err := confirmLocalStoreCreationIfNeeded(storageHere, strings.NewReader("y\n"), &out); err != nil {
+		t.Fatalf("confirmLocalStoreCreationIfNeeded: %v", err)
+	}
+	if !strings.Contains(out.String(), "Create .todos file? [y/N]:") {
+		t.Fatalf("expected confirmation prompt, got %q", out.String())
+	}
+	location, err := resolveStoreLocation(storageHere)
+	if err != nil {
+		t.Fatalf("resolveStoreLocation: %v", err)
+	}
+	if !location.Created {
+		t.Fatal("expected newly created local store")
+	}
+	if _, err := os.Stat(filepath.Join(tempDir, ".todos")); err != nil {
+		t.Fatalf("expected local file to be created: %v", err)
+	}
+}
+
+func TestConfirmLocalStoreCreationIfNeededDeclinesCreation(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	tempDir := t.TempDir()
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatalf("chdir temp dir: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(wd)
+	}()
+
+	var out bytes.Buffer
+	err = confirmLocalStoreCreationIfNeeded(storageHere, strings.NewReader("n\n"), &out)
+	if err == nil {
+		t.Fatal("expected declined local store creation to return error")
+	}
+	if !strings.Contains(err.Error(), "canceled") {
+		t.Fatalf("expected cancel error, got %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(tempDir, ".todos")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected local file not to be created, got %v", statErr)
 	}
 }
 
@@ -423,13 +482,13 @@ func TestSwitchScopeFromGlobalPromptsBeforeCreatingLocalStore(t *testing.T) {
 		t.Fatalf("expected local store not to exist yet, got %v", err)
 	}
 	view := m.View()
-	if !strings.Contains(view, "Create ./.todos and switch to local scope?") {
+	if !strings.Contains(view, "Create .todos file? [y/N]") {
 		t.Fatalf("expected confirmation prompt in view, got %q", view)
 	}
 	_ = os.Remove(globalPath)
 }
 
-func TestConfirmLocalScopeSwitchWithEnterCreatesLocalStore(t *testing.T) {
+func TestConfirmLocalScopeSwitchWithEnterCancels(t *testing.T) {
 	wd, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("getwd: %v", err)
@@ -459,7 +518,7 @@ func TestConfirmLocalScopeSwitchWithEnterCreatesLocalStore(t *testing.T) {
 
 	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	if cmd != nil {
-		t.Fatal("expected no command when confirming local store creation")
+		t.Fatal("expected no command when canceling local store creation")
 	}
 	next, ok := updated.(model)
 	if !ok {
@@ -467,22 +526,13 @@ func TestConfirmLocalScopeSwitchWithEnterCreatesLocalStore(t *testing.T) {
 	}
 	localPath := filepath.Join(projectDir, ".todos")
 	if next.confirmCreateLocal {
-		t.Fatal("expected confirm prompt to close after confirmation")
+		t.Fatal("expected confirm prompt to close after enter")
 	}
-	if next.location.Scope != storeScopeLocal {
-		t.Fatalf("expected local scope, got %v", next.location.Scope)
+	if next.location.Scope != storeScopeGlobal {
+		t.Fatalf("expected to stay in global scope, got %v", next.location.Scope)
 	}
-	if canonicalPath(t, next.location.Path) != canonicalPath(t, localPath) {
-		t.Fatalf("expected local path %q, got %q", localPath, next.location.Path)
-	}
-	if !next.location.Created {
-		t.Fatal("expected created local store")
-	}
-	if !strings.Contains(next.location.Notice, ".gitignore") {
-		t.Fatalf("expected gitignore notice, got %q", next.location.Notice)
-	}
-	if _, err := os.Stat(localPath); err != nil {
-		t.Fatalf("expected local store to exist: %v", err)
+	if _, err := os.Stat(localPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected local store not to exist after enter cancel, got %v", err)
 	}
 	_ = os.Remove(globalPath)
 }

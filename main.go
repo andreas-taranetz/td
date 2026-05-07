@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -102,6 +104,10 @@ func run(args []string) error {
 	if opts.action == actionHelp {
 		printHelp()
 		return nil
+	}
+
+	if err := confirmLocalStoreCreationIfNeeded(opts.storage, os.Stdin, os.Stdout); err != nil {
+		return err
 	}
 
 	s, location, err := loadStore(opts.storage)
@@ -397,6 +403,46 @@ func localDataPath() (string, error) {
 	return filepath.Join(cwd, ".todos"), nil
 }
 
+func confirmLocalStoreCreationIfNeeded(mode storageMode, in io.Reader, out io.Writer) error {
+	if mode != storageHere {
+		return nil
+	}
+
+	path, err := localDataPath()
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("check local todos: %w", err)
+	}
+
+	ok, err := confirmLocalStoreCreation(in, out)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return errors.New("local .todos creation canceled")
+	}
+
+	return nil
+}
+
+func confirmLocalStoreCreation(in io.Reader, out io.Writer) (bool, error) {
+	if _, err := fmt.Fprint(out, "Create .todos file? [y/N]: "); err != nil {
+		return false, fmt.Errorf("write confirmation prompt: %w", err)
+	}
+
+	response, err := bufio.NewReader(in).ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return false, fmt.Errorf("read confirmation: %w", err)
+	}
+
+	response = strings.TrimSpace(strings.ToLower(response))
+	return response == "y" || response == "yes", nil
+}
+
 func loadStore(mode storageMode) (store, storeLocation, error) {
 	location, err := resolveStoreLocation(mode)
 	if err != nil {
@@ -687,10 +733,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.confirmCreateLocal {
 			switch msg.Type {
 			case tea.KeyEnter:
-				if err := m.confirmLocalScopeSwitch(); err != nil {
-					m.err = err
-					return m, tea.Quit
-				}
+				m.confirmCreateLocal = false
 			case tea.KeyEsc:
 				m.confirmCreateLocal = false
 			default:
@@ -868,7 +911,7 @@ func (m model) View() string {
 	}
 	if m.confirmCreateLocal {
 		b.WriteString("\n")
-		b.WriteString(accentStyle.Render("Create ./.todos and switch to local scope? Enter/y confirm • Esc/n cancel."))
+		b.WriteString(accentStyle.Render("Create .todos file? [y/N]"))
 	}
 	b.WriteString("\n\n")
 
