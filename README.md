@@ -43,6 +43,9 @@ td --help
 td
 td "vibe features"
 td -t "fix bugs"
+td -H
+td -H -l
+td -g -l
 td -l
 td -la
 ```
@@ -52,11 +55,15 @@ td -la
 - `td "text"` adds a new item at the bottom
 - `td -t "text"` or `td --top "text"` adds at the top
 - `td -b "text"` or `td --bottom "text"` adds at the bottom
+- `td -H` or `td --here` creates `./.todos` when needed and then uses it
+- `td -g` or `td --global` forces the global store even when `./.todos` exists
 - `td -l` or `td --list` lists open items
 - `td -la` or `td --list-all` lists all items including done ones
 
 After non-interactive add commands, the current open todo list is printed in a formatted, colorized view.
 Open-only output omits checkboxes; `-la` includes them.
+Interactive mode and list output show whether td is using the local or global store.
+When `td -H` creates a new local `.todos` inside a git checkout, td also shows what to add to `.gitignore` so the file stays local.
 
 ## Interactive controls
 
@@ -79,7 +86,12 @@ Open-only output omits checkboxes; `-la` includes them.
 
 ## Data storage
 
-Todos are stored in a local JSON file.
+td uses project-local storage first when `./.todos` exists in the current directory.
+If no local file exists, it falls back to the global store.
 
-- macOS path: `~/Library/Application Support/td/todos.json`
-- fallback path: `.td.json`
+- local project file: `./.todos`
+- macOS global path: `~/Library/Application Support/td/todos.json`
+- fallback global path: `.td.json`
+
+Use `td -H` to create `./.todos` and continue with the requested action in the current directory.
+Use `td -g` to access the global todos even inside a project folder with a local `.todos` file.

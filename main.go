@@ -33,6 +33,12 @@ type completionFrameMsg struct{}
 
 type editMode int
 
+type actionMode int
+
+type storageMode int
+
+type storeScope int
+
 const (
 	addBottom addPosition = iota
 	addTop
@@ -45,6 +51,41 @@ const (
 	editModeCurrent
 )
 
+const (
+	actionInteractive actionMode = iota
+	actionAdd
+	actionList
+	actionListAll
+	actionHelp
+)
+
+const (
+	storageAuto storageMode = iota
+	storageHere
+	storageGlobal
+)
+
+const (
+	storeScopeLocal storeScope = iota
+	storeScopeGlobal
+)
+
+type runOptions struct {
+	action      actionMode
+	position    addPosition
+	storage     storageMode
+	addArgs     []string
+	sawPosition bool
+}
+
+type storeLocation struct {
+	Path       string
+	Scope      storeScope
+	SourceText string
+	Created    bool
+	Notice     string
+}
+
 func main() {
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -53,54 +94,117 @@ func main() {
 }
 
 func run(args []string) error {
-	if len(args) == 0 {
-		return runInteractive()
+	opts, err := parseArgs(args)
+	if err != nil {
+		return err
 	}
 
-	position := addBottom
-	addArgs := make([]string, 0, len(args))
+	if opts.action == actionHelp {
+		printHelp()
+		return nil
+	}
+
+	s, location, err := loadStore(opts.storage)
+	if err != nil {
+		return err
+	}
+
+	switch opts.action {
+	case actionList:
+		return printTodos(s, false, location)
+	case actionListAll:
+		return printTodos(s, true, location)
+	case actionAdd:
+		return runAdd(opts.addArgs, opts.position, s, location)
+	default:
+		return runInteractive(s, location)
+	}
+}
+
+func parseArgs(args []string) (runOptions, error) {
+	opts := runOptions{
+		action:   actionInteractive,
+		position: addBottom,
+		storage:  storageAuto,
+		addArgs:  make([]string, 0, len(args)),
+	}
+
 	for _, arg := range args {
 		switch arg {
 		case "-l", "--list":
-			if len(args) != 1 {
-				return errors.New("list flag cannot be combined with todo text")
+			if len(opts.addArgs) > 0 {
+				return runOptions{}, errors.New("list flag cannot be combined with todo text")
 			}
-			return runList(false)
+			if opts.sawPosition {
+				return runOptions{}, errors.New("list flag cannot be combined with add position flags")
+			}
+			if opts.action != actionInteractive {
+				return runOptions{}, errors.New("list flag cannot be combined with other action flags")
+			}
+			opts.action = actionList
 		case "-la", "--list-all":
-			if len(args) != 1 {
-				return errors.New("list-all flag cannot be combined with todo text")
+			if len(opts.addArgs) > 0 {
+				return runOptions{}, errors.New("list-all flag cannot be combined with todo text")
 			}
-			return runList(true)
+			if opts.sawPosition {
+				return runOptions{}, errors.New("list-all flag cannot be combined with add position flags")
+			}
+			if opts.action != actionInteractive {
+				return runOptions{}, errors.New("list-all flag cannot be combined with other action flags")
+			}
+			opts.action = actionListAll
 		case "help", "-h", "--help":
 			if len(args) != 1 {
-				return errors.New("help flag cannot be combined with todo text")
+				return runOptions{}, errors.New("help flag cannot be combined with other arguments")
 			}
-			printHelp()
-			return nil
+			opts.action = actionHelp
 		case "-t", "--top":
-			position = addTop
+			if opts.action == actionList || opts.action == actionListAll {
+				return runOptions{}, errors.New("add position flags cannot be combined with list flags")
+			}
+			opts.position = addTop
+			opts.sawPosition = true
 		case "-b", "--bottom":
-			position = addBottom
+			if opts.action == actionList || opts.action == actionListAll {
+				return runOptions{}, errors.New("add position flags cannot be combined with list flags")
+			}
+			opts.position = addBottom
+			opts.sawPosition = true
+		case "-H", "--here":
+			if opts.storage == storageGlobal {
+				return runOptions{}, errors.New("here and global flags cannot be combined")
+			}
+			opts.storage = storageHere
+		case "-g", "--global":
+			if opts.storage == storageHere {
+				return runOptions{}, errors.New("here and global flags cannot be combined")
+			}
+			opts.storage = storageGlobal
 		default:
 			if strings.HasPrefix(arg, "-") {
-				return fmt.Errorf("unknown flag: %s", arg)
+				return runOptions{}, fmt.Errorf("unknown flag: %s", arg)
 			}
-			addArgs = append(addArgs, arg)
+			if opts.action == actionList {
+				return runOptions{}, errors.New("list flag cannot be combined with todo text")
+			}
+			if opts.action == actionListAll {
+				return runOptions{}, errors.New("list-all flag cannot be combined with todo text")
+			}
+			opts.addArgs = append(opts.addArgs, arg)
 		}
 	}
 
-	return runAdd(addArgs, position)
+	if len(opts.addArgs) > 0 || opts.sawPosition {
+		opts.action = actionAdd
+	}
+
+	return opts, nil
 }
 
-func runAdd(args []string, position addPosition) error {
+func runAdd(args []string, position addPosition, s store, location storeLocation) error {
 	description := strings.TrimSpace(strings.Join(args, " "))
 	if description == "" {
 		return errors.New("todo description cannot be empty")
-	}
-
-	s, path, err := loadStore()
-	if err != nil {
-		return err
 	}
 
 	item := todo{
@@ -113,23 +217,14 @@ func runAdd(args []string, position addPosition) error {
 		s.Items = append(s.Items, item)
 	}
 
-	if err := saveStore(path, s); err != nil {
+	if err := saveStore(location.Path, s); err != nil {
 		return err
 	}
 
-	return printTodos(s, false)
+	return printTodos(s, false, location)
 }
 
-func runList(showAll bool) error {
-	s, _, err := loadStore()
-	if err != nil {
-		return err
-	}
-
-	return printTodos(s, showAll)
-}
-
-func printTodos(s store, showAll bool) error {
+func printTodos(s store, showAll bool, location storeLocation) error {
 	visible := make([]todo, 0, len(s.Items))
 	for _, item := range s.Items {
 		if !showAll && item.Done {
@@ -145,8 +240,13 @@ func printTodos(s store, showAll bool) error {
 	}
 
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("Todo:"))
-	b.WriteString("\n\n")
+	b.WriteString(titleStyle.Render(todoTitle(location)))
+	b.WriteString("\n")
+	if location.Notice != "" {
+		b.WriteString(subtitleStyle.Render(renderLocationNotice(location.Notice)))
+		b.WriteString("\n")
+	}
+	b.WriteString("\n")
 	for i, item := range visible {
 		index := accentStyle.Render(fmt.Sprintf("%*d.", indexWidth, i+1))
 		prefix := fmt.Sprintf("%s %s", index, item.Description)
@@ -188,13 +288,8 @@ func printTodos(s store, showAll bool) error {
 	return nil
 }
 
-func runInteractive() error {
-	s, path, err := loadStore()
-	if err != nil {
-		return err
-	}
-
-	m := newModel(s, path)
+func runInteractive(s store, location storeLocation) error {
+	m := newModel(s, location)
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	finalModel, err := p.Run()
 	if err != nil {
@@ -220,10 +315,14 @@ func printHelp() {
 	fmt.Println("Usage:")
 	fmt.Printf("  %s                 open interactive mode\n", cmd)
 	fmt.Printf("  %s --help          show help\n", cmd)
+	fmt.Printf("  %s -H              create and use ./.todos\n", cmd)
+	fmt.Printf("  %s -g              force the global todo store\n", cmd)
 	fmt.Printf("  %s \"buy milk\"      add a todo at the bottom\n", cmd)
 	fmt.Printf("  %s -t \"buy milk\"   add a todo at the top\n", cmd)
 	fmt.Printf("  %s -l              list open todos\n", cmd)
 	fmt.Printf("  %s -la             list all todos\n", cmd)
+	fmt.Printf("  %s -H -l           list local todos from ./.todos\n", cmd)
+	fmt.Printf("  %s -g -l           list global todos\n", cmd)
 	fmt.Println()
 	fmt.Println("Interactive controls:")
 	fmt.Println("  j/down   move down")
@@ -242,7 +341,36 @@ func printHelp() {
 	fmt.Println("  H        hide done")
 	fmt.Println("  q        quit")
 	fmt.Println()
-	fmt.Printf("Data file: %s\n", dataPath())
+	fmt.Printf("Global data file: %s\n", globalDataPath())
+	fmt.Println("Local project file: ./.todos")
+}
+
+func renderLocationNotice(notice string) string {
+	return notice
+}
+
+func todoTitle(location storeLocation) string {
+	source := titleSourceText(location)
+	if source == "" {
+		return "Todo:"
+	}
+	return fmt.Sprintf("Todo (%s):", source)
+}
+
+func titleSourceText(location storeLocation) string {
+	if location.Scope == storeScopeLocal {
+		return "local"
+	}
+
+	localPath, err := localDataPath()
+	if err != nil {
+		return ""
+	}
+	if _, err := os.Stat(localPath); err == nil {
+		return "global"
+	}
+
+	return ""
 }
 
 func commandName() string {
@@ -253,7 +381,7 @@ func commandName() string {
 	return name
 }
 
-func dataPath() string {
+func globalDataPath() string {
 	base, err := os.UserConfigDir()
 	if err != nil {
 		return ".td.json"
@@ -261,22 +389,118 @@ func dataPath() string {
 	return filepath.Join(base, "td", "todos.json")
 }
 
-func loadStore() (store, string, error) {
-	path := dataPath()
-	data, err := os.ReadFile(path)
+func localDataPath() (string, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("resolve current directory: %w", err)
+	}
+	return filepath.Join(cwd, ".todos"), nil
+}
+
+func loadStore(mode storageMode) (store, storeLocation, error) {
+	location, err := resolveStoreLocation(mode)
+	if err != nil {
+		return store{}, storeLocation{}, err
+	}
+
+	data, err := os.ReadFile(location.Path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return store{}, path, nil
+			return store{}, location, nil
 		}
-		return store{}, path, fmt.Errorf("read todos: %w", err)
+		return store{}, storeLocation{}, fmt.Errorf("read todos: %w", err)
 	}
 
 	var s store
 	if err := json.Unmarshal(data, &s); err != nil {
-		return store{}, path, fmt.Errorf("parse todos: %w", err)
+		return store{}, storeLocation{}, fmt.Errorf("parse todos: %w", err)
 	}
 
-	return s, path, nil
+	return s, location, nil
+}
+
+func resolveStoreLocation(mode storageMode) (storeLocation, error) {
+	localPath, err := localDataPath()
+	if err != nil {
+		return storeLocation{}, err
+	}
+
+	switch mode {
+	case storageHere:
+		created, notice, err := ensureStoreFile(localPath)
+		if err != nil {
+			return storeLocation{}, err
+		}
+		return storeLocation{Path: localPath, Scope: storeScopeLocal, SourceText: "local .todos", Created: created, Notice: notice}, nil
+	case storageGlobal:
+		return storeLocation{Path: globalDataPath(), Scope: storeScopeGlobal, SourceText: "global store"}, nil
+	default:
+		if _, err := os.Stat(localPath); err == nil {
+			return storeLocation{Path: localPath, Scope: storeScopeLocal, SourceText: "local .todos"}, nil
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return storeLocation{}, fmt.Errorf("check local todos: %w", err)
+		}
+		return storeLocation{Path: globalDataPath(), Scope: storeScopeGlobal, SourceText: "global store"}, nil
+	}
+}
+
+func ensureStoreFile(path string) (bool, string, error) {
+	if _, err := os.Stat(path); err == nil {
+		return false, "", nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return false, "", fmt.Errorf("check todos file: %w", err)
+	}
+
+	if err := saveStore(path, store{}); err != nil {
+		return false, "", err
+	}
+
+	return true, localStoreNotice(path), nil
+}
+
+func localStoreNotice(path string) string {
+	gitRoot, ok := gitRoot(filepath.Dir(path))
+	if !ok {
+		return fmt.Sprintf("Created %s file.", path)
+	}
+
+	displayPath := gitignoreEntry(gitRoot, path)
+	if strings.HasPrefix(displayPath, "/") {
+		displayPath = strings.TrimPrefix(displayPath, "/")
+	}
+	ignoreEntry := gitignoreEntry(gitRoot, path)
+	return fmt.Sprintf("Created %s file.\nTo keep local todos out of git, add %q to .gitignore.", displayPath, ignoreEntry)
+}
+
+func gitRoot(startDir string) (string, bool) {
+	dir := filepath.Clean(startDir)
+	for {
+		gitDir := filepath.Join(dir, ".git")
+		if info, err := os.Stat(gitDir); err == nil {
+			_ = info
+			return dir, true
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return "", false
+		}
+
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", false
+		}
+		dir = parent
+	}
+}
+
+func gitignoreEntry(root, path string) string {
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return filepath.Base(path)
+	}
+	rel = filepath.ToSlash(rel)
+	if rel == ".todos" {
+		return ".todos"
+	}
+	return "/" + rel
 }
 
 func saveStore(path string, s store) error {
@@ -301,6 +525,7 @@ type keyMap struct {
 	Down       key.Binding
 	Top        key.Binding
 	Bottom     key.Binding
+	SwitchView key.Binding
 	MoveUp     key.Binding
 	MoveDown   key.Binding
 	EditStart  key.Binding
@@ -317,11 +542,11 @@ type keyMap struct {
 }
 
 func (k keyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Up, k.Down, k.EditStart, k.OpenBelow, k.ToggleAll, k.Help, k.Quit}
+	return []key.Binding{k.Toggle, k.Help, k.Quit}
 }
 
 func (k keyMap) FullHelp() [][]key.Binding {
-	return [][]key.Binding{{k.Up, k.Down, k.Top, k.Bottom}, {k.EditStart, k.EditEnd, k.OpenBelow, k.OpenAbove}, {k.Toggle, k.Delete, k.ClearDone, k.MoveUp}, {k.MoveDown, k.ToggleAll, k.Help, k.Cancel, k.Quit}}
+	return [][]key.Binding{{k.Up, k.Down, k.Top, k.Bottom}, {k.EditStart, k.EditEnd, k.OpenBelow, k.OpenAbove}, {k.Toggle, k.Delete, k.ClearDone, k.MoveUp}, {k.MoveDown, k.ToggleAll, k.SwitchView, k.Help}, {k.Cancel, k.Quit}}
 }
 
 var keys = keyMap{
@@ -341,6 +566,10 @@ var keys = keyMap{
 		key.WithKeys("G"),
 		key.WithHelp("G", "jump bottom"),
 	),
+	SwitchView: key.NewBinding(
+		key.WithKeys("tab"),
+		key.WithHelp("tab", "switch scope"),
+	),
 	MoveUp: key.NewBinding(
 		key.WithKeys("K", "shift+up"),
 		key.WithHelp("K/S-up", "move item up"),
@@ -350,11 +579,11 @@ var keys = keyMap{
 		key.WithHelp("J/S-down", "move item down"),
 	),
 	EditStart: key.NewBinding(
-		key.WithKeys("i"),
+		key.WithKeys("i", "I"),
 		key.WithHelp("i", "edit from start"),
 	),
 	EditEnd: key.NewBinding(
-		key.WithKeys("a"),
+		key.WithKeys("a", "A"),
 		key.WithHelp("a", "edit from end"),
 	),
 	OpenBelow: key.NewBinding(
@@ -397,9 +626,11 @@ var keys = keyMap{
 
 type model struct {
 	store                 store
-	path                  string
+	location              storeLocation
 	cursor                int
 	showAll               bool
+	confirmCreateLocal    bool
+	directionalNewItem     int
 	help                  help.Model
 	showHelp              bool
 	editMode              editMode
@@ -416,19 +647,19 @@ type model struct {
 	height                int
 }
 
-func newModel(s store, path string) model {
+func newModel(s store, location storeLocation) model {
 	h := help.New()
 	h.ShowAll = false
 	h.Styles.FullKey = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
 	h.Styles.FullDesc = lipgloss.NewStyle().Foreground(lipgloss.Color("250"))
 
 	return model{
-		store:    s,
-		path:     path,
-		showAll:  !s.HideDoneInTUI,
-		help:     h,
-		insertAt: -1,
-		editIndex: -1,
+		store:              s,
+		location:           location,
+		showAll:            !s.HideDoneInTUI,
+		help:               h,
+		insertAt:           -1,
+		editIndex:          -1,
 		animatingDoneIndex: -1,
 	}
 }
@@ -453,7 +684,41 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.animatingDoneIndex = -1
 		}
 	case tea.KeyMsg:
+		if m.confirmCreateLocal {
+			switch msg.Type {
+			case tea.KeyEnter:
+				if err := m.confirmLocalScopeSwitch(); err != nil {
+					m.err = err
+					return m, tea.Quit
+				}
+			case tea.KeyEsc:
+				m.confirmCreateLocal = false
+			default:
+				if msg.Type == tea.KeyRunes {
+					switch strings.ToLower(msg.String()) {
+					case "y":
+						if err := m.confirmLocalScopeSwitch(); err != nil {
+							m.err = err
+							return m, tea.Quit
+						}
+					case "n":
+						m.confirmCreateLocal = false
+					}
+				}
+			}
+			return m, nil
+		}
+
 		if m.isEditing() {
+			if m.isDirectionalNewItemEdit() {
+				switch {
+				case key.Matches(msg, keys.Up):
+					return m.handleDirectionalEditKey(-1)
+				case key.Matches(msg, keys.Down):
+					return m.handleDirectionalEditKey(1)
+				}
+			}
+
 			switch msg.Type {
 			case tea.KeyEsc:
 				m.cancelEdit()
@@ -495,6 +760,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.pendingG = false
 			m.showHelp = !m.showHelp
 			m.help.ShowAll = m.showHelp
+		case msg.Type == tea.KeyEnter && len(m.store.Items) == 0:
+			m.pendingG = false
+			m.startNewItem(true)
 		case key.Matches(msg, keys.Top):
 			if m.pendingG {
 				m.cursor = 0
@@ -507,6 +775,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			visible := m.visibleIndexes()
 			if len(visible) > 0 {
 				m.cursor = len(visible) - 1
+			}
+		case key.Matches(msg, keys.SwitchView):
+			m.pendingG = false
+			if err := m.switchScope(); err != nil {
+				m.err = err
+				return m, tea.Quit
 			}
 		case key.Matches(msg, keys.EditStart):
 			m.pendingG = false
@@ -524,17 +798,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.pendingG = false
 			if m.cursor > 0 {
 				m.cursor--
+			} else if len(m.visibleIndexes()) > 0 {
+				m.startDirectionalNewItem(false, -1)
 			}
 		case key.Matches(msg, keys.Down):
 			m.pendingG = false
 			if m.cursor < len(m.visibleIndexes())-1 {
 				m.cursor++
+			} else if len(m.visibleIndexes()) > 0 {
+				m.startDirectionalNewItem(true, 1)
 			}
 		case key.Matches(msg, keys.ToggleAll):
 			m.pendingG = false
 			m.showAll = !m.showAll
 			m.store.HideDoneInTUI = !m.showAll
-			if err := saveStore(m.path, m.store); err != nil {
+			if err := saveStore(m.location.Path, m.store); err != nil {
 				m.err = err
 				return m, tea.Quit
 			}
@@ -584,6 +862,14 @@ func (m model) View() string {
 	b.WriteString(titleStyle.Render("Todo:"))
 	b.WriteString("\n")
 	b.WriteString(subtitleStyle.Render(m.statusLine()))
+	if m.location.Notice != "" {
+		b.WriteString("\n")
+		b.WriteString(mutedStyle.Render(renderLocationNotice(m.location.Notice)))
+	}
+	if m.confirmCreateLocal {
+		b.WriteString("\n")
+		b.WriteString(accentStyle.Render("Create ./.todos and switch to local scope? Enter/y confirm • Esc/n cancel."))
+	}
 	b.WriteString("\n\n")
 
 	if len(m.store.Items) == 0 {
@@ -592,7 +878,7 @@ func (m model) View() string {
 			b.WriteString("\n")
 			b.WriteString(mutedStyle.Render(m.editModeHelp()))
 		} else {
-			b.WriteString(mutedStyle.Render("No todos yet. Press o or O to add one."))
+			b.WriteString(mutedStyle.Render("No todos yet. Press enter to add one."))
 		}
 		b.WriteString("\n\n")
 		b.WriteString(m.help.View(keys))
@@ -707,7 +993,7 @@ func (m *model) toggleCurrent() (tea.Cmd, error) {
 		m.store.Items[idx].DoneAt = time.Time{}
 	}
 
-	if err := saveStore(m.path, m.store); err != nil {
+	if err := saveStore(m.location.Path, m.store); err != nil {
 		return nil, err
 	}
 
@@ -772,6 +1058,10 @@ func (m model) isEditingNewItem() bool {
 	return m.editMode == editModeNewAbove || m.editMode == editModeNewBelow
 }
 
+func (m model) isDirectionalNewItemEdit() bool {
+	return m.isEditingNewItem() && m.directionalNewItem != 0
+}
+
 func (m model) isEditingCurrentIndex(idx int) bool {
 	return m.editMode == editModeCurrent && m.editIndex == idx
 }
@@ -782,6 +1072,7 @@ func (m *model) cancelEdit() {
 	m.inputCursor = 0
 	m.insertAt = -1
 	m.editIndex = -1
+	m.directionalNewItem = 0
 }
 
 func (m *model) insertInput(s string) {
@@ -822,7 +1113,7 @@ func (m *model) moveCurrent(delta int) error {
 	to := visible[toCursor]
 
 	m.store.Items[from], m.store.Items[to] = m.store.Items[to], m.store.Items[from]
-	if err := saveStore(m.path, m.store); err != nil {
+	if err := saveStore(m.location.Path, m.store); err != nil {
 		return err
 	}
 
@@ -846,7 +1137,52 @@ func (m model) statusLine() string {
 		mode = "showing open"
 	}
 
-	return fmt.Sprintf("%d open, %d done • %s", open, done, mode)
+	return fmt.Sprintf("%d open, %d done • %s • %s", open, done, mode, m.location.SourceText)
+}
+
+func (m *model) switchScope() error {
+	if m.location.Scope == storeScopeLocal {
+		return m.switchToScope(storageGlobal)
+	}
+
+	localPath, err := localDataPath()
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(localPath); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			m.confirmCreateLocal = true
+			return nil
+		}
+		return fmt.Errorf("check local todos: %w", err)
+	}
+
+	return m.switchToScope(storageHere)
+}
+
+func (m *model) confirmLocalScopeSwitch() error {
+	m.confirmCreateLocal = false
+	return m.switchToScope(storageHere)
+}
+
+func (m *model) switchToScope(mode storageMode) error {
+	s, location, err := loadStore(mode)
+	if err != nil {
+		return err
+	}
+
+	m.store = s
+	m.location = location
+	m.showAll = !s.HideDoneInTUI
+	m.confirmCreateLocal = false
+	m.cursor = 0
+	m.pendingG = false
+	m.animatingDoneIndex = -1
+	m.animatingDoneFrames = 0
+	m.animatingDoneCursor = 0
+	m.cancelEdit()
+	m.clampCursor()
+	return nil
 }
 
 var (
@@ -888,7 +1224,7 @@ func (m *model) commitInput() error {
 	}
 	if m.editMode == editModeCurrent && m.editIndex >= 0 && m.editIndex < len(m.store.Items) {
 		m.store.Items[m.editIndex].Description = description
-		if err := saveStore(m.path, m.store); err != nil {
+		if err := saveStore(m.location.Path, m.store); err != nil {
 			return err
 		}
 		m.cancelEdit()
@@ -910,7 +1246,7 @@ func (m *model) commitInput() error {
 	m.store.Items = append(m.store.Items, todo{})
 	copy(m.store.Items[insertAt+1:], m.store.Items[insertAt:])
 	m.store.Items[insertAt] = newTodo
-	if err := saveStore(m.path, m.store); err != nil {
+	if err := saveStore(m.location.Path, m.store); err != nil {
 		return err
 	}
 
@@ -925,10 +1261,16 @@ func (m *model) startNewItem(after bool) {
 	if after {
 		m.editMode = editModeNewBelow
 	}
+	m.directionalNewItem = 0
 	m.input = ""
 	m.inputCursor = 0
 	m.editIndex = -1
 	m.insertAt = m.currentInsertIndex(after)
+}
+
+func (m *model) startDirectionalNewItem(after bool, direction int) {
+	m.startNewItem(after)
+	m.directionalNewItem = direction
 }
 
 func (m *model) startEditCurrent(atEnd bool) {
@@ -940,6 +1282,7 @@ func (m *model) startEditCurrent(atEnd bool) {
 
 	idx := visible[m.cursor]
 	m.editMode = editModeCurrent
+	m.directionalNewItem = 0
 	m.editIndex = idx
 	m.insertAt = -1
 	m.input = m.store.Items[idx].Description
@@ -992,20 +1335,20 @@ func (m model) editModeHelp() string {
 	case editModeCurrent:
 		return "Editing current item. Enter saves. Esc cancels."
 	case editModeNewAbove:
-		return "Adding item above. Enter saves. Esc cancels."
+		return "Adding item. Enter saves. Esc cancels."
 	case editModeNewBelow:
-		return "Adding item below. Enter saves. Esc cancels."
+		return "Adding item. Enter saves. Esc cancels."
 	}
 
 	visible := m.visibleIndexes()
 	if len(m.store.Items) == 0 || len(visible) == 0 {
-		return "Adding first item. Enter saves. Esc cancels."
+		return "Adding item. Enter saves. Esc cancels."
 	}
 	current := visible[m.cursor]
 	if m.insertAt <= current {
-		return "Adding item above. Enter saves. Esc cancels."
+		return "Adding item. Enter saves. Esc cancels."
 	}
-	return "Adding item below. Enter saves. Esc cancels."
+	return "Adding item. Enter saves. Esc cancels."
 }
 
 func (m *model) deleteCurrent() error {
@@ -1016,7 +1359,7 @@ func (m *model) deleteCurrent() error {
 
 	idx := visible[m.cursor]
 	m.store.Items = append(m.store.Items[:idx], m.store.Items[idx+1:]...)
-	if err := saveStore(m.path, m.store); err != nil {
+	if err := saveStore(m.location.Path, m.store); err != nil {
 		return err
 	}
 
@@ -1034,12 +1377,28 @@ func (m *model) clearArchived() error {
 	}
 	m.store.Items = items
 
-	if err := saveStore(m.path, m.store); err != nil {
+	if err := saveStore(m.location.Path, m.store); err != nil {
 		return err
 	}
 
 	m.clampCursor()
 	return nil
+}
+
+func (m *model) handleDirectionalEditKey(direction int) (tea.Model, tea.Cmd) {
+	if direction == m.directionalNewItem {
+		if strings.TrimSpace(m.input) != "" {
+			if err := m.commitInput(); err != nil {
+				m.err = err
+				return *m, tea.Quit
+			}
+		}
+		m.startDirectionalNewItem(direction > 0, direction)
+		return *m, nil
+	}
+
+	m.cancelEdit()
+	return *m, nil
 }
 
 func cursorGlyph() string {
