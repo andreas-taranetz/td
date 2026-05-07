@@ -1,0 +1,1079 @@
+package main
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/charmbracelet/bubbles/help"
+	"github.com/charmbracelet/bubbles/key"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+)
+
+type todo struct {
+	Description string    `json:"description"`
+	Done        bool      `json:"done"`
+	CreatedAt   time.Time `json:"created_at"`
+	DoneAt      time.Time `json:"done_at,omitempty"`
+}
+
+type store struct {
+	Items            []todo `json:"items"`
+	HideDoneInTUI    bool   `json:"hide_done_in_tui,omitempty"`
+}
+
+type addPosition int
+
+type completionFrameMsg struct{}
+
+type editMode int
+
+const (
+	addBottom addPosition = iota
+	addTop
+)
+
+const (
+	editModeNone editMode = iota
+	editModeNewAbove
+	editModeNewBelow
+	editModeCurrent
+)
+
+func main() {
+	if err := run(os.Args[1:]); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+func run(args []string) error {
+	if len(args) == 0 {
+		return runInteractive()
+	}
+
+	position := addBottom
+	addArgs := make([]string, 0, len(args))
+	for _, arg := range args {
+		switch arg {
+		case "-l", "--list":
+			if len(args) != 1 {
+				return errors.New("list flag cannot be combined with todo text")
+			}
+			return runList(false)
+		case "-la", "--list-all":
+			if len(args) != 1 {
+				return errors.New("list-all flag cannot be combined with todo text")
+			}
+			return runList(true)
+		case "help", "-h", "--help":
+			if len(args) != 1 {
+				return errors.New("help flag cannot be combined with todo text")
+			}
+			printHelp()
+			return nil
+		case "-t", "--top":
+			position = addTop
+		case "-b", "--bottom":
+			position = addBottom
+		default:
+			if strings.HasPrefix(arg, "-") {
+				return fmt.Errorf("unknown flag: %s", arg)
+			}
+			addArgs = append(addArgs, arg)
+		}
+	}
+
+	return runAdd(addArgs, position)
+}
+
+func runAdd(args []string, position addPosition) error {
+	description := strings.TrimSpace(strings.Join(args, " "))
+	if description == "" {
+		return errors.New("todo description cannot be empty")
+	}
+
+	s, path, err := loadStore()
+	if err != nil {
+		return err
+	}
+
+	item := todo{
+		Description: description,
+		CreatedAt:   time.Now(),
+	}
+	if position == addTop {
+		s.Items = append([]todo{item}, s.Items...)
+	} else {
+		s.Items = append(s.Items, item)
+	}
+
+	if err := saveStore(path, s); err != nil {
+		return err
+	}
+
+	return printTodos(s, false)
+}
+
+func runList(showAll bool) error {
+	s, _, err := loadStore()
+	if err != nil {
+		return err
+	}
+
+	return printTodos(s, showAll)
+}
+
+func printTodos(s store, showAll bool) error {
+	visible := make([]todo, 0, len(s.Items))
+	for _, item := range s.Items {
+		if !showAll && item.Done {
+			continue
+		}
+		visible = append(visible, item)
+	}
+
+	count := len(visible)
+	indexWidth := len(fmt.Sprintf("%d", count))
+	if indexWidth < 1 {
+		indexWidth = 1
+	}
+
+	var b strings.Builder
+	b.WriteString(titleStyle.Render("Todo:"))
+	b.WriteString("\n\n")
+	for i, item := range visible {
+		index := accentStyle.Render(fmt.Sprintf("%*d.", indexWidth, i+1))
+		prefix := fmt.Sprintf("%s %s", index, item.Description)
+		if showAll {
+			checkbox := openBoxStyle.Render("[ ]")
+			text := item.Description
+			if item.Done {
+				checkbox = doneBoxStyle.Render("[✓]")
+				text = doneTextStyle.Render(text)
+			}
+			prefix = fmt.Sprintf("%s %s %s", index, checkbox, text)
+		}
+		b.WriteString(prefix)
+		b.WriteString("\n")
+	}
+
+	if count == 0 {
+		if showAll {
+			b.WriteString(mutedStyle.Render("no todos"))
+		} else {
+			b.WriteString(mutedStyle.Render("no open todos"))
+		}
+	} else {
+		b.WriteString("\n")
+		if showAll {
+			done := 0
+			for _, item := range s.Items {
+				if item.Done {
+					done++
+				}
+			}
+			b.WriteString(subtitleStyle.Render(fmt.Sprintf("%d items, %d done", count, done)))
+		} else {
+			b.WriteString(subtitleStyle.Render(fmt.Sprintf("%d open", count)))
+		}
+	}
+
+	fmt.Println(appStyle(0).Render(strings.TrimRight(b.String(), "\n")))
+	return nil
+}
+
+func runInteractive() error {
+	s, path, err := loadStore()
+	if err != nil {
+		return err
+	}
+
+	m := newModel(s, path)
+	p := tea.NewProgram(m, tea.WithAltScreen())
+	finalModel, err := p.Run()
+	if err != nil {
+		return err
+	}
+
+	result, ok := finalModel.(model)
+	if !ok {
+		return nil
+	}
+
+	if result.err != nil {
+		return result.err
+	}
+
+	return nil
+}
+
+func printHelp() {
+	cmd := commandName()
+	fmt.Printf("%s - simple terminal todo app\n", cmd)
+	fmt.Println()
+	fmt.Println("Usage:")
+	fmt.Printf("  %s                 open interactive mode\n", cmd)
+	fmt.Printf("  %s --help          show help\n", cmd)
+	fmt.Printf("  %s \"buy milk\"      add a todo at the bottom\n", cmd)
+	fmt.Printf("  %s -t \"buy milk\"   add a todo at the top\n", cmd)
+	fmt.Printf("  %s -l              list open todos\n", cmd)
+	fmt.Printf("  %s -la             list all todos\n", cmd)
+	fmt.Println()
+	fmt.Println("Interactive controls:")
+	fmt.Println("  j/down   move down")
+	fmt.Println("  k/up     move up")
+	fmt.Println("  gg       jump top")
+	fmt.Println("  G        jump bottom")
+	fmt.Println("  i        edit from start")
+	fmt.Println("  a        edit from end")
+	fmt.Println("  o        new below")
+	fmt.Println("  O        new above")
+	fmt.Println("  J/S-down move item down")
+	fmt.Println("  K/S-up   move item up")
+	fmt.Println("  x/enter  toggle done")
+	fmt.Println("  d        delete item")
+	fmt.Println("  D        delete all done")
+	fmt.Println("  H        hide done")
+	fmt.Println("  q        quit")
+	fmt.Println()
+	fmt.Printf("Data file: %s\n", dataPath())
+}
+
+func commandName() string {
+	name := filepath.Base(os.Args[0])
+	if name == "" || name == "." {
+		return "td"
+	}
+	return name
+}
+
+func dataPath() string {
+	base, err := os.UserConfigDir()
+	if err != nil {
+		return ".td.json"
+	}
+	return filepath.Join(base, "td", "todos.json")
+}
+
+func loadStore() (store, string, error) {
+	path := dataPath()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return store{}, path, nil
+		}
+		return store{}, path, fmt.Errorf("read todos: %w", err)
+	}
+
+	var s store
+	if err := json.Unmarshal(data, &s); err != nil {
+		return store{}, path, fmt.Errorf("parse todos: %w", err)
+	}
+
+	return s, path, nil
+}
+
+func saveStore(path string, s store) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create config dir: %w", err)
+	}
+
+	data, err := json.MarshalIndent(s, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode todos: %w", err)
+	}
+
+	if err := os.WriteFile(path, append(data, '\n'), 0o644); err != nil {
+		return fmt.Errorf("write todos: %w", err)
+	}
+
+	return nil
+}
+
+type keyMap struct {
+	Up         key.Binding
+	Down       key.Binding
+	Top        key.Binding
+	Bottom     key.Binding
+	MoveUp     key.Binding
+	MoveDown   key.Binding
+	EditStart  key.Binding
+	EditEnd    key.Binding
+	OpenBelow  key.Binding
+	OpenAbove  key.Binding
+	Toggle     key.Binding
+	Delete     key.Binding
+	ClearDone  key.Binding
+	ToggleAll  key.Binding
+	Quit       key.Binding
+	Cancel     key.Binding
+	Help       key.Binding
+}
+
+func (k keyMap) ShortHelp() []key.Binding {
+	return []key.Binding{k.Up, k.Down, k.EditStart, k.OpenBelow, k.ToggleAll, k.Help, k.Quit}
+}
+
+func (k keyMap) FullHelp() [][]key.Binding {
+	return [][]key.Binding{{k.Up, k.Down, k.Top, k.Bottom}, {k.EditStart, k.EditEnd, k.OpenBelow, k.OpenAbove}, {k.Toggle, k.Delete, k.ClearDone, k.MoveUp}, {k.MoveDown, k.ToggleAll, k.Help, k.Cancel, k.Quit}}
+}
+
+var keys = keyMap{
+	Up: key.NewBinding(
+		key.WithKeys("k", "up"),
+		key.WithHelp("k/up", "move up"),
+	),
+	Down: key.NewBinding(
+		key.WithKeys("j", "down"),
+		key.WithHelp("j/down", "move down"),
+	),
+	Top: key.NewBinding(
+		key.WithKeys("g"),
+		key.WithHelp("gg", "jump top"),
+	),
+	Bottom: key.NewBinding(
+		key.WithKeys("G"),
+		key.WithHelp("G", "jump bottom"),
+	),
+	MoveUp: key.NewBinding(
+		key.WithKeys("K", "shift+up"),
+		key.WithHelp("K/S-up", "move item up"),
+	),
+	MoveDown: key.NewBinding(
+		key.WithKeys("J", "shift+down"),
+		key.WithHelp("J/S-down", "move item down"),
+	),
+	EditStart: key.NewBinding(
+		key.WithKeys("i"),
+		key.WithHelp("i", "edit from start"),
+	),
+	EditEnd: key.NewBinding(
+		key.WithKeys("a"),
+		key.WithHelp("a", "edit from end"),
+	),
+	OpenBelow: key.NewBinding(
+		key.WithKeys("o"),
+		key.WithHelp("o", "new below"),
+	),
+	OpenAbove: key.NewBinding(
+		key.WithKeys("O"),
+		key.WithHelp("O", "new above"),
+	),
+	Toggle: key.NewBinding(
+		key.WithKeys("x", "enter", " "),
+		key.WithHelp("x/enter", "toggle done"),
+	),
+	Delete: key.NewBinding(
+		key.WithKeys("d"),
+		key.WithHelp("d", "delete item"),
+	),
+	ClearDone: key.NewBinding(
+		key.WithKeys("D"),
+		key.WithHelp("D", "delete all done"),
+	),
+	ToggleAll: key.NewBinding(
+		key.WithKeys("H"),
+		key.WithHelp("H", "show all/open"),
+	),
+	Quit: key.NewBinding(
+		key.WithKeys("q", "ctrl+c"),
+		key.WithHelp("q", "quit"),
+	),
+	Cancel: key.NewBinding(
+		key.WithKeys("esc"),
+		key.WithHelp("esc", "cancel add"),
+	),
+	Help: key.NewBinding(
+		key.WithKeys("?"),
+		key.WithHelp("?", "toggle help"),
+	),
+}
+
+type model struct {
+	store                 store
+	path                  string
+	cursor                int
+	showAll               bool
+	help                  help.Model
+	showHelp              bool
+	editMode              editMode
+	input                 string
+	inputCursor           int
+	insertAt              int
+	editIndex             int
+	pendingG              bool
+	animatingDoneIndex    int
+	animatingDoneFrames   int
+	animatingDoneCursor   int
+	err                   error
+	width                 int
+	height                int
+}
+
+func newModel(s store, path string) model {
+	h := help.New()
+	h.ShowAll = false
+	h.Styles.FullKey = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
+	h.Styles.FullDesc = lipgloss.NewStyle().Foreground(lipgloss.Color("250"))
+
+	return model{
+		store:    s,
+		path:     path,
+		showAll:  !s.HideDoneInTUI,
+		help:     h,
+		insertAt: -1,
+		editIndex: -1,
+		animatingDoneIndex: -1,
+	}
+}
+
+func (m model) Init() tea.Cmd {
+	return nil
+}
+
+func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+	case completionFrameMsg:
+		if m.animatingDoneFrames > 0 {
+			m.animatingDoneFrames--
+			if m.animatingDoneFrames > 0 {
+				return m, nextCompletionFrame()
+			}
+			m.cursor = m.animatingDoneCursor
+			m.clampCursor()
+			m.animatingDoneIndex = -1
+		}
+	case tea.KeyMsg:
+		if m.isEditing() {
+			switch msg.Type {
+			case tea.KeyEsc:
+				m.cancelEdit()
+				return m, nil
+			case tea.KeyEnter:
+				if err := m.commitInput(); err != nil {
+					m.err = err
+					return m, tea.Quit
+				}
+				return m, nil
+			case tea.KeySpace:
+				m.insertInput(" ")
+				return m, nil
+			case tea.KeyLeft:
+				if m.inputCursor > 0 {
+					m.inputCursor--
+				}
+				return m, nil
+			case tea.KeyRight:
+				if m.inputCursor < len([]rune(m.input)) {
+					m.inputCursor++
+				}
+				return m, nil
+			case tea.KeyBackspace, tea.KeyCtrlH:
+				m.backspaceInput()
+				return m, nil
+			default:
+				if msg.Type == tea.KeyRunes {
+					m.insertInput(msg.String())
+				}
+				return m, nil
+			}
+		}
+
+		switch {
+		case key.Matches(msg, keys.Quit):
+			return m, tea.Quit
+		case key.Matches(msg, keys.Help):
+			m.pendingG = false
+			m.showHelp = !m.showHelp
+			m.help.ShowAll = m.showHelp
+		case key.Matches(msg, keys.Top):
+			if m.pendingG {
+				m.cursor = 0
+				m.pendingG = false
+				break
+			}
+			m.pendingG = true
+		case key.Matches(msg, keys.Bottom):
+			m.pendingG = false
+			visible := m.visibleIndexes()
+			if len(visible) > 0 {
+				m.cursor = len(visible) - 1
+			}
+		case key.Matches(msg, keys.EditStart):
+			m.pendingG = false
+			m.startEditCurrent(false)
+		case key.Matches(msg, keys.EditEnd):
+			m.pendingG = false
+			m.startEditCurrent(true)
+		case key.Matches(msg, keys.OpenBelow):
+			m.pendingG = false
+			m.startNewItem(true)
+		case key.Matches(msg, keys.OpenAbove):
+			m.pendingG = false
+			m.startNewItem(false)
+		case key.Matches(msg, keys.Up):
+			m.pendingG = false
+			if m.cursor > 0 {
+				m.cursor--
+			}
+		case key.Matches(msg, keys.Down):
+			m.pendingG = false
+			if m.cursor < len(m.visibleIndexes())-1 {
+				m.cursor++
+			}
+		case key.Matches(msg, keys.ToggleAll):
+			m.pendingG = false
+			m.showAll = !m.showAll
+			m.store.HideDoneInTUI = !m.showAll
+			if err := saveStore(m.path, m.store); err != nil {
+				m.err = err
+				return m, tea.Quit
+			}
+			m.clampCursor()
+		case key.Matches(msg, keys.Toggle):
+			m.pendingG = false
+			cmd, err := m.toggleCurrent()
+			if err != nil {
+				m.err = err
+				return m, tea.Quit
+			}
+			return m, cmd
+		case key.Matches(msg, keys.Delete):
+			m.pendingG = false
+			if err := m.deleteCurrent(); err != nil {
+				m.err = err
+				return m, tea.Quit
+			}
+		case key.Matches(msg, keys.ClearDone):
+			m.pendingG = false
+			if err := m.clearArchived(); err != nil {
+				m.err = err
+				return m, tea.Quit
+			}
+		case key.Matches(msg, keys.MoveUp):
+			m.pendingG = false
+			if err := m.moveCurrent(-1); err != nil {
+				m.err = err
+				return m, tea.Quit
+			}
+		case key.Matches(msg, keys.MoveDown):
+			m.pendingG = false
+			if err := m.moveCurrent(1); err != nil {
+				m.err = err
+				return m, tea.Quit
+			}
+		default:
+			m.pendingG = false
+		}
+	}
+
+	return m, nil
+}
+
+func (m model) View() string {
+	var b strings.Builder
+	b.WriteString(titleStyle.Render("Todo:"))
+	b.WriteString("\n")
+	b.WriteString(subtitleStyle.Render(m.statusLine()))
+	b.WriteString("\n\n")
+
+	if len(m.store.Items) == 0 {
+		if m.isEditing() {
+			b.WriteString(renderInputRow(m.input, m.inputCursor, openBoxStyle.Background(background).Render("[ ]"), false))
+			b.WriteString("\n")
+			b.WriteString(mutedStyle.Render(m.editModeHelp()))
+		} else {
+			b.WriteString(mutedStyle.Render("No todos yet. Press o or O to add one."))
+		}
+		b.WriteString("\n\n")
+		b.WriteString(m.help.View(keys))
+		return appStyle(m.width).Render(b.String())
+	}
+
+	visible := m.visibleIndexes()
+	if len(visible) == 0 {
+		if m.isEditing() {
+			b.WriteString(renderInputRow(m.input, m.inputCursor, openBoxStyle.Background(background).Render("[ ]"), false))
+			b.WriteString("\n")
+			b.WriteString(mutedStyle.Render(m.editModeHelp()))
+			b.WriteString("\n\n")
+		}
+		b.WriteString(mutedStyle.Render("No items in this view. Press H to toggle filters."))
+		b.WriteString("\n\n")
+		b.WriteString(m.help.View(keys))
+		return appStyle(m.width).Render(b.String())
+	}
+
+	insertRow := -1
+	if m.isEditingNewItem() {
+		insertRow = m.insertRow(visible)
+	}
+
+	for row := 0; row < len(visible); row++ {
+		if row == insertRow {
+			b.WriteString(renderInputRow(m.input, m.inputCursor, openBoxStyle.Background(background).Render("[ ]"), false))
+			b.WriteString("\n")
+		}
+
+		idx := visible[row]
+		if m.isEditingCurrentIndex(idx) {
+			checkbox := openBoxStyle.Background(background).Render("[ ]")
+			if m.store.Items[idx].Done {
+				checkbox = doneBoxStyle.Background(background).Render("[✓]")
+			}
+			b.WriteString(renderInputRow(m.input, m.inputCursor, checkbox, false))
+			b.WriteString("\n")
+			continue
+		}
+
+		item := m.store.Items[idx]
+		isSelected := row == m.cursor && !m.isEditingNewItem()
+		cursor := "  "
+		if isSelected {
+			cursor = accentStyle.Render("->")
+		}
+
+		checkbox, text := m.rowAppearance(idx, item.Description, item.Done, isSelected)
+		line := fmt.Sprintf("%s %s %s", cursor, checkbox, text)
+		if isSelected {
+			b.WriteString(line)
+		} else {
+			b.WriteString(line)
+		}
+		b.WriteString("\n")
+	}
+
+	if m.isEditingNewItem() && insertRow == len(visible) {
+		b.WriteString(renderInputRow(m.input, m.inputCursor, openBoxStyle.Background(background).Render("[ ]"), false))
+		b.WriteString("\n")
+	}
+
+	b.WriteString("\n")
+	if m.isEditing() {
+		b.WriteString(mutedStyle.Render(m.editModeHelp()))
+		b.WriteString("\n\n")
+	}
+	b.WriteString(m.help.View(keys))
+
+	return appStyle(m.width).Render(b.String())
+}
+
+func (m model) visibleIndexes() []int {
+	indexes := make([]int, 0, len(m.store.Items))
+	for i, item := range m.store.Items {
+		if !m.showAll && item.Done && !(i == m.animatingDoneIndex && m.animatingDoneFrames > 0) {
+			continue
+		}
+		indexes = append(indexes, i)
+	}
+	return indexes
+}
+
+func (m *model) clampCursor() {
+	visible := m.visibleIndexes()
+	if len(visible) == 0 {
+		m.cursor = 0
+		return
+	}
+	if m.cursor >= len(visible) {
+		m.cursor = len(visible) - 1
+	}
+	if m.cursor < 0 {
+		m.cursor = 0
+	}
+}
+
+func (m *model) toggleCurrent() (tea.Cmd, error) {
+	visible := m.visibleIndexes()
+	if len(visible) == 0 {
+		return nil, nil
+	}
+
+	idx := visible[m.cursor]
+	wasDone := m.store.Items[idx].Done
+	m.store.Items[idx].Done = !m.store.Items[idx].Done
+	if m.store.Items[idx].Done {
+		m.store.Items[idx].DoneAt = time.Now()
+	} else {
+		m.store.Items[idx].DoneAt = time.Time{}
+	}
+
+	if err := saveStore(m.path, m.store); err != nil {
+		return nil, err
+	}
+
+	if !wasDone && m.store.Items[idx].Done {
+		m.animatingDoneIndex = idx
+		m.animatingDoneFrames = 4
+		m.animatingDoneCursor = m.cursor
+		m.clampCursor()
+		return nextCompletionFrame(), nil
+	}
+
+	m.animatingDoneIndex = -1
+
+	m.clampCursor()
+	return nil, nil
+}
+
+func (m model) animatedDoneAppearance(description string) (string, string) {
+	switch m.animatingDoneFrames {
+	case 4:
+		return accentStyle.Render("[•]"), lipgloss.NewStyle().Foreground(foreground).Render(description)
+	case 3:
+		return accentStyle.Render("[✔]"), lipgloss.NewStyle().Foreground(foreground).Bold(true).Render(description)
+	case 2:
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("79")).Render("[✓]"), lipgloss.NewStyle().Foreground(foreground).Render(description)
+	default:
+		return doneBoxStyle.Render("[✓]"), doneTextStyle.Render(description)
+	}
+}
+
+func (m model) rowAppearance(idx int, description string, done bool, selected bool) (string, string) {
+	if idx == m.animatingDoneIndex && m.animatingDoneFrames > 0 {
+		return m.animatedDoneAppearance(description)
+	}
+
+	textStyle := lipgloss.NewStyle()
+	if selected {
+		textStyle = textStyle.Background(background)
+	}
+
+	checkbox := openBoxStyle.Render("[ ]")
+	text := textStyle.Foreground(foreground).Render(description)
+	if done {
+		boxStyle := doneBoxStyle
+		if selected {
+			boxStyle = boxStyle.Background(background)
+		}
+		checkbox = boxStyle.Render("[✓]")
+		text = textStyle.Foreground(doneColor).Strikethrough(true).Render(description)
+	} else if selected {
+		checkbox = openBoxStyle.Background(background).Render("[ ]")
+	}
+
+	return checkbox, text
+}
+
+func (m model) isEditing() bool {
+	return m.editMode != editModeNone
+}
+
+func (m model) isEditingNewItem() bool {
+	return m.editMode == editModeNewAbove || m.editMode == editModeNewBelow
+}
+
+func (m model) isEditingCurrentIndex(idx int) bool {
+	return m.editMode == editModeCurrent && m.editIndex == idx
+}
+
+func (m *model) cancelEdit() {
+	m.editMode = editModeNone
+	m.input = ""
+	m.inputCursor = 0
+	m.insertAt = -1
+	m.editIndex = -1
+}
+
+func (m *model) insertInput(s string) {
+	runes := []rune(m.input)
+	insert := []rune(s)
+	runes = append(runes[:m.inputCursor], append(insert, runes[m.inputCursor:]...)...)
+	m.input = string(runes)
+	m.inputCursor += len(insert)
+}
+
+func (m *model) backspaceInput() {
+	if m.inputCursor == 0 {
+		return
+	}
+	runes := []rune(m.input)
+	runes = append(runes[:m.inputCursor-1], runes[m.inputCursor:]...)
+	m.input = string(runes)
+	m.inputCursor--
+}
+
+func nextCompletionFrame() tea.Cmd {
+	return tea.Tick(70*time.Millisecond, func(time.Time) tea.Msg {
+		return completionFrameMsg{}
+	})
+}
+
+func (m *model) moveCurrent(delta int) error {
+	visible := m.visibleIndexes()
+	if len(visible) == 0 {
+		return nil
+	}
+
+	from := visible[m.cursor]
+	toCursor := m.cursor + delta
+	if toCursor < 0 || toCursor >= len(visible) {
+		return nil
+	}
+	to := visible[toCursor]
+
+	m.store.Items[from], m.store.Items[to] = m.store.Items[to], m.store.Items[from]
+	if err := saveStore(m.path, m.store); err != nil {
+		return err
+	}
+
+	m.cursor = toCursor
+	return nil
+}
+
+func (m model) statusLine() string {
+	open := 0
+	done := 0
+	for _, item := range m.store.Items {
+		if item.Done {
+			done++
+			continue
+		}
+		open++
+	}
+
+	mode := "showing all"
+	if !m.showAll {
+		mode = "showing open"
+	}
+
+	return fmt.Sprintf("%d open, %d done • %s", open, done, mode)
+}
+
+var (
+	background = lipgloss.Color("236")
+	foreground = lipgloss.Color("252")
+	muted      = lipgloss.Color("245")
+	accent     = lipgloss.Color("39")
+	doneColor  = lipgloss.Color("241")
+
+	titleStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("230")).
+			Background(accent).
+			Padding(0, 1)
+
+	subtitleStyle = lipgloss.NewStyle().Foreground(muted)
+	mutedStyle    = lipgloss.NewStyle().Foreground(muted)
+	accentStyle   = lipgloss.NewStyle().Foreground(accent).Bold(true)
+	openBoxStyle  = lipgloss.NewStyle().Foreground(accent)
+	doneBoxStyle  = lipgloss.NewStyle().Foreground(doneColor)
+	doneTextStyle = lipgloss.NewStyle().Foreground(doneColor).Strikethrough(true)
+	selectedStyle = lipgloss.NewStyle().
+			Foreground(foreground).
+			Background(background)
+)
+
+func appStyle(width int) lipgloss.Style {
+	style := lipgloss.NewStyle().Padding(1, 2)
+	if width > 0 {
+		style = style.MaxWidth(width)
+	}
+	return style
+}
+
+func (m *model) commitInput() error {
+	description := strings.TrimSpace(m.input)
+	if description == "" {
+		return nil
+	}
+	if m.editMode == editModeCurrent && m.editIndex >= 0 && m.editIndex < len(m.store.Items) {
+		m.store.Items[m.editIndex].Description = description
+		if err := saveStore(m.path, m.store); err != nil {
+			return err
+		}
+		m.cancelEdit()
+		m.cursor = m.cursorForIndex(m.editIndex)
+		m.clampCursor()
+		return nil
+	}
+
+	newTodo := todo{
+		Description: description,
+		CreatedAt:   time.Now(),
+	}
+
+	insertAt := m.insertAt
+	if insertAt < 0 || insertAt > len(m.store.Items) {
+		insertAt = len(m.store.Items)
+	}
+
+	m.store.Items = append(m.store.Items, todo{})
+	copy(m.store.Items[insertAt+1:], m.store.Items[insertAt:])
+	m.store.Items[insertAt] = newTodo
+	if err := saveStore(m.path, m.store); err != nil {
+		return err
+	}
+
+	m.cancelEdit()
+	m.cursor = m.cursorForIndex(insertAt)
+	m.clampCursor()
+	return nil
+}
+
+func (m *model) startNewItem(after bool) {
+	m.editMode = editModeNewAbove
+	if after {
+		m.editMode = editModeNewBelow
+	}
+	m.input = ""
+	m.inputCursor = 0
+	m.editIndex = -1
+	m.insertAt = m.currentInsertIndex(after)
+}
+
+func (m *model) startEditCurrent(atEnd bool) {
+	visible := m.visibleIndexes()
+	if len(visible) == 0 {
+		m.startNewItem(true)
+		return
+	}
+
+	idx := visible[m.cursor]
+	m.editMode = editModeCurrent
+	m.editIndex = idx
+	m.insertAt = -1
+	m.input = m.store.Items[idx].Description
+	m.inputCursor = 0
+	if atEnd {
+		m.inputCursor = len([]rune(m.input))
+	}
+}
+
+func (m model) currentInsertIndex(after bool) int {
+	visible := m.visibleIndexes()
+	if len(m.store.Items) == 0 || len(visible) == 0 {
+		return len(m.store.Items)
+	}
+
+	idx := visible[m.cursor]
+	if after {
+		return idx + 1
+	}
+	return idx
+}
+
+func (m model) cursorForIndex(idx int) int {
+	visible := m.visibleIndexes()
+	for pos, itemIdx := range visible {
+		if itemIdx == idx {
+			return pos
+		}
+	}
+	if len(visible) == 0 {
+		return 0
+	}
+	if idx >= len(m.store.Items)-1 {
+		return len(visible) - 1
+	}
+	return m.cursor
+}
+
+func (m model) insertRow(visible []int) int {
+	for row, idx := range visible {
+		if m.insertAt <= idx {
+			return row
+		}
+	}
+	return len(visible)
+}
+
+func (m model) editModeHelp() string {
+	switch m.editMode {
+	case editModeCurrent:
+		return "Editing current item. Enter saves. Esc cancels."
+	case editModeNewAbove:
+		return "Adding item above. Enter saves. Esc cancels."
+	case editModeNewBelow:
+		return "Adding item below. Enter saves. Esc cancels."
+	}
+
+	visible := m.visibleIndexes()
+	if len(m.store.Items) == 0 || len(visible) == 0 {
+		return "Adding first item. Enter saves. Esc cancels."
+	}
+	current := visible[m.cursor]
+	if m.insertAt <= current {
+		return "Adding item above. Enter saves. Esc cancels."
+	}
+	return "Adding item below. Enter saves. Esc cancels."
+}
+
+func (m *model) deleteCurrent() error {
+	visible := m.visibleIndexes()
+	if len(visible) == 0 {
+		return nil
+	}
+
+	idx := visible[m.cursor]
+	m.store.Items = append(m.store.Items[:idx], m.store.Items[idx+1:]...)
+	if err := saveStore(m.path, m.store); err != nil {
+		return err
+	}
+
+	m.clampCursor()
+	return nil
+}
+
+func (m *model) clearArchived() error {
+	items := m.store.Items[:0]
+	for _, item := range m.store.Items {
+		if item.Done {
+			continue
+		}
+		items = append(items, item)
+	}
+	m.store.Items = items
+
+	if err := saveStore(m.path, m.store); err != nil {
+		return err
+	}
+
+	m.clampCursor()
+	return nil
+}
+
+func cursorGlyph() string {
+	return accentStyle.Render("█")
+}
+
+var inputStyle = lipgloss.NewStyle().
+	Foreground(foreground).
+	Background(lipgloss.Color("238")).
+	Padding(0, 1)
+
+var inputInlineStyle = lipgloss.NewStyle().
+	Foreground(foreground)
+
+func renderInputRow(input string, cursorPos int, checkbox string, padded bool) string {
+	runes := []rune(input)
+	if cursorPos < 0 {
+		cursorPos = 0
+	}
+	if cursorPos > len(runes) {
+		cursorPos = len(runes)
+	}
+	content := string(runes[:cursorPos]) + cursorGlyph() + string(runes[cursorPos:])
+	text := inputInlineStyle.Render(content)
+	if padded {
+		text = inputStyle.Render(content)
+	}
+	return renderSelectedRow(accentStyle.Render("->"), checkbox, text)
+}
+
+func renderSelectedRow(cursor, checkbox, text string) string {
+	segment := lipgloss.NewStyle().Background(background)
+	if checkbox == "" {
+		return segment.Render(cursor) + segment.Render("  ") + segment.Render(text)
+	}
+	return segment.Render(cursor) + segment.Render(" ") + segment.Render(checkbox) + segment.Render(" ") + segment.Render(text)
+}
