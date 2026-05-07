@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -1012,5 +1013,46 @@ func TestDirectionalAddUpCancelsOnDown(t *testing.T) {
 	}
 	if cancelled.directionalNewItem != 0 {
 		t.Fatalf("expected directional marker reset, got %d", cancelled.directionalNewItem)
+	}
+}
+
+func TestFormatRelativeTaskTime(t *testing.T) {
+	now := time.Date(2026, time.May, 7, 15, 30, 0, 0, time.UTC)
+	tests := []struct {
+		name string
+		ts   time.Time
+		want string
+	}{
+		{name: "same day", ts: time.Date(2026, time.May, 7, 9, 45, 0, 0, time.UTC), want: "09:45"},
+		{name: "yesterday with time", ts: time.Date(2026, time.May, 6, 18, 45, 0, 0, time.UTC), want: "yesterday 18:45"},
+		{name: "day of week", ts: time.Date(2026, time.May, 4, 11, 0, 0, 0, time.UTC), want: "on Monday"},
+		{name: "last week", ts: time.Date(2026, time.April, 30, 12, 0, 0, 0, time.UTC), want: "last week"},
+		{name: "two weeks ago", ts: time.Date(2026, time.April, 20, 12, 0, 0, 0, time.UTC), want: "2 weeks ago"},
+		{name: "three weeks ago", ts: time.Date(2026, time.April, 14, 12, 0, 0, 0, time.UTC), want: "3 weeks ago"},
+		{name: "last month", ts: time.Date(2026, time.April, 1, 12, 0, 0, 0, time.UTC), want: "last month"},
+		{name: "named month", ts: time.Date(2026, time.January, 15, 12, 0, 0, 0, time.UTC), want: "in January"},
+		{name: "last year", ts: time.Date(2025, time.December, 31, 12, 0, 0, 0, time.UTC), want: "last year"},
+		{name: "years ago", ts: time.Date(2023, time.March, 1, 12, 0, 0, 0, time.UTC), want: "3 years ago"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := formatRelativeTaskTime(tt.ts, now); got != tt.want {
+				t.Fatalf("formatRelativeTaskTime() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestTaskTimestampText(t *testing.T) {
+	now := time.Date(2026, time.May, 7, 15, 30, 0, 0, time.UTC)
+	open := todo{Description: "open", CreatedAt: time.Date(2026, time.May, 7, 9, 45, 0, 0, time.UTC)}
+	if got := taskTimestampText(open, now); got != "created 09:45" {
+		t.Fatalf("open timestamp = %q, want %q", got, "created 09:45")
+	}
+
+	done := todo{Description: "done", Done: true, CreatedAt: time.Date(2026, time.May, 1, 9, 0, 0, 0, time.UTC), DoneAt: time.Date(2026, time.May, 6, 18, 45, 0, 0, time.UTC)}
+	if got := taskTimestampText(done, now); got != "done yesterday 18:45" {
+		t.Fatalf("done timestamp = %q, want %q", got, "done yesterday 18:45")
 	}
 }

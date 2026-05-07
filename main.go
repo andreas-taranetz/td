@@ -253,6 +253,8 @@ func printTodos(s store, showAll bool, location storeLocation) error {
 		b.WriteString("\n")
 	}
 	b.WriteString("\n")
+	now := time.Now()
+	listWidth := 0
 	for i, item := range visible {
 		index := accentStyle.Render(fmt.Sprintf("%*d.", indexWidth, i+1))
 		prefix := fmt.Sprintf("%s %s", index, item.Description)
@@ -265,7 +267,8 @@ func printTodos(s store, showAll bool, location storeLocation) error {
 			}
 			prefix = fmt.Sprintf("%s %s %s", index, checkbox, text)
 		}
-		b.WriteString(prefix)
+		line := renderAlignedRow(prefix, taskTimestampText(item, now), listWidth, false)
+		b.WriteString(line)
 		b.WriteString("\n")
 	}
 
@@ -917,7 +920,7 @@ func (m model) View() string {
 
 	if len(m.store.Items) == 0 {
 		if m.isEditing() {
-			b.WriteString(renderInputRow(m.input, m.inputCursor, openBoxStyle.Background(background).Render("[ ]"), false))
+			b.WriteString(renderInputRow(m.input, m.inputCursor, openBoxStyle.Background(background).Render("[ ]"), false, m.contentWidth()))
 			b.WriteString("\n")
 			b.WriteString(mutedStyle.Render(m.editModeHelp()))
 		} else {
@@ -931,7 +934,7 @@ func (m model) View() string {
 	visible := m.visibleIndexes()
 	if len(visible) == 0 {
 		if m.isEditing() {
-			b.WriteString(renderInputRow(m.input, m.inputCursor, openBoxStyle.Background(background).Render("[ ]"), false))
+			b.WriteString(renderInputRow(m.input, m.inputCursor, openBoxStyle.Background(background).Render("[ ]"), false, m.contentWidth()))
 			b.WriteString("\n")
 			b.WriteString(mutedStyle.Render(m.editModeHelp()))
 			b.WriteString("\n\n")
@@ -947,9 +950,11 @@ func (m model) View() string {
 		insertRow = m.insertRow(visible)
 	}
 
+	now := time.Now()
+	contentWidth := m.contentWidth()
 	for row := 0; row < len(visible); row++ {
 		if row == insertRow {
-			b.WriteString(renderInputRow(m.input, m.inputCursor, openBoxStyle.Background(background).Render("[ ]"), false))
+			b.WriteString(renderInputRow(m.input, m.inputCursor, openBoxStyle.Background(background).Render("[ ]"), false, contentWidth))
 			b.WriteString("\n")
 		}
 
@@ -959,20 +964,22 @@ func (m model) View() string {
 			if m.store.Items[idx].Done {
 				checkbox = doneBoxStyle.Background(background).Render("[✓]")
 			}
-			b.WriteString(renderInputRow(m.input, m.inputCursor, checkbox, false))
+			b.WriteString(renderInputRow(m.input, m.inputCursor, checkbox, false, contentWidth))
 			b.WriteString("\n")
 			continue
 		}
 
 		item := m.store.Items[idx]
+		timestamp := taskTimestampText(item, now)
 		isSelected := row == m.cursor && !m.isEditingNewItem()
 		cursor := "  "
 		if isSelected {
 			cursor = accentStyle.Render("->")
 		}
 
-		checkbox, text := m.rowAppearance(idx, item.Description, item.Done, isSelected)
-		line := fmt.Sprintf("%s %s %s", cursor, checkbox, text)
+		checkbox, text := m.rowAppearance(idx, item.Description, item.Done, isSelected, contentWidth, timestamp)
+		left := fmt.Sprintf("%s %s %s", cursor, checkbox, text)
+		line := renderAlignedRow(left, timestamp, contentWidth, isSelected)
 		if isSelected {
 			b.WriteString(line)
 		} else {
@@ -982,7 +989,7 @@ func (m model) View() string {
 	}
 
 	if m.isEditingNewItem() && insertRow == len(visible) {
-		b.WriteString(renderInputRow(m.input, m.inputCursor, openBoxStyle.Background(background).Render("[ ]"), false))
+		b.WriteString(renderInputRow(m.input, m.inputCursor, openBoxStyle.Background(background).Render("[ ]"), false, contentWidth))
 		b.WriteString("\n")
 	}
 
@@ -1067,9 +1074,10 @@ func (m model) animatedDoneAppearance(description string) (string, string) {
 	}
 }
 
-func (m model) rowAppearance(idx int, description string, done bool, selected bool) (string, string) {
+func (m model) rowAppearance(idx int, description string, done bool, selected bool, rowWidth int, timestamp string) (string, string) {
 	if idx == m.animatingDoneIndex && m.animatingDoneFrames > 0 {
-		return m.animatedDoneAppearance(description)
+		checkbox, text := m.animatedDoneAppearance(description)
+		return checkbox, truncateStyledText(text, availableDescriptionWidth(rowWidth, selected, timestamp))
 	}
 
 	textStyle := lipgloss.NewStyle()
@@ -1090,7 +1098,178 @@ func (m model) rowAppearance(idx int, description string, done bool, selected bo
 		checkbox = openBoxStyle.Background(background).Render("[ ]")
 	}
 
-	return checkbox, text
+	return checkbox, truncateStyledText(text, availableDescriptionWidth(rowWidth, selected, timestamp))
+}
+
+func renderAlignedRow(left, timestamp string, width int, selected bool) string {
+	if timestamp == "" {
+		return left
+	}
+	right := renderTimestampText(timestamp, selected)
+	if width <= 0 {
+		return left + rightAlignSpacer(left, right, 0) + right
+	}
+	return left + rightAlignSpacer(left, right, width) + right
+}
+
+func availableDescriptionWidth(rowWidth int, selected bool, timestamp string) int {
+	if rowWidth <= 0 {
+		return 0
+	}
+	reserved := lipgloss.Width("   [ ] ")
+	if selected {
+		reserved += lipgloss.Width("->")
+	} else {
+		reserved += lipgloss.Width("  ")
+	}
+	if timestamp != "" {
+		reserved += lipgloss.Width(renderTimestampText(timestamp, selected)) + 2
+	}
+	available := rowWidth - reserved
+	if available < 4 {
+		return 4
+	}
+	return available
+}
+
+func truncateStyledText(text string, width int) string {
+	if width <= 0 || lipgloss.Width(text) <= width {
+		return text
+	}
+	if width <= 1 {
+		return lipgloss.NewStyle().MaxWidth(width).Inline(true).Render("…")
+	}
+	visible := lipgloss.NewStyle().MaxWidth(width-1).Inline(true).Render(text)
+	for lipgloss.Width(visible) > width-1 {
+		visible = lipgloss.NewStyle().MaxWidth(lipgloss.Width(visible)-1).Inline(true).Render(visible)
+	}
+	return visible + "…"
+}
+
+func renderTimestampText(text string, selected bool) string {
+	if text == "" {
+		return ""
+	}
+
+	style := timestampStyle
+	if selected {
+		style = style.Background(background)
+	}
+	return style.Render(text)
+
+}
+
+func rightAlignSpacer(left, right string, width int) string {
+	gap := 2
+	if width > 0 {
+		remaining := width - lipgloss.Width(left) - lipgloss.Width(right)
+		if remaining > gap {
+			gap = remaining
+		}
+	}
+	if gap < 1 {
+		gap = 1
+	}
+	return strings.Repeat(" ", gap)
+}
+
+func (m model) contentWidth() int {
+	if m.width <= 0 {
+		return 0
+	}
+	width := m.width - 4
+	if width < 0 {
+		return 0
+}
+	return width
+}
+
+func taskTimestampText(item todo, now time.Time) string {
+	if item.Done {
+		if item.DoneAt.IsZero() {
+			return ""
+		}
+		return "done " + formatRelativeTaskTime(item.DoneAt, now)
+	}
+	if item.CreatedAt.IsZero() {
+		return ""
+	}
+	return "created " + formatRelativeTaskTime(item.CreatedAt, now)
+}
+
+func formatRelativeTaskTime(ts, now time.Time) string {
+	if ts.IsZero() {
+		return ""
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+
+	loc := now.Location()
+	ts = ts.In(loc)
+	now = now.In(loc)
+	if ts.After(now) {
+		return ts.Format("15:04")
+	}
+
+	if now.Sub(ts) < 24*time.Hour {
+		if sameDay(ts, now) {
+			return ts.Format("15:04")
+		}
+		if dayDiff(ts, now) == 1 {
+			return "yesterday " + ts.Format("15:04")
+		}
+	}
+
+	days := dayDiff(ts, now)
+	switch {
+	case days <= 0:
+		return ts.Format("15:04")
+	case days == 1:
+		return "yesterday"
+	case days < 7:
+		return "on " + ts.Format("Monday")
+	case days < 14:
+		return "last week"
+	case days < 21:
+		return "2 weeks ago"
+	case days < 28:
+		return "3 weeks ago"
+	}
+
+	monthDiff := (now.Year()-ts.Year())*12 + int(now.Month()-ts.Month())
+	years := now.Year() - ts.Year()
+	if years > 0 {
+		if years == 1 {
+			return "last year"
+		}
+		return fmt.Sprintf("%d years ago", years)
+	}
+
+	switch {
+	case monthDiff <= 0:
+		weeks := days / 7
+		if weeks <= 1 {
+			return "last week"
+		}
+		return fmt.Sprintf("%d weeks ago", weeks)
+	case monthDiff == 1:
+		return "last month"
+	case monthDiff < 12:
+		return "in " + ts.Format("January")
+	}
+
+	return "in " + ts.Format("January")
+}
+
+func dayDiff(ts, now time.Time) int {
+	tsDay := time.Date(ts.Year(), ts.Month(), ts.Day(), 0, 0, 0, 0, ts.Location())
+	nowDay := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	return int(nowDay.Sub(tsDay) / (24 * time.Hour))
+}
+
+func sameDay(a, b time.Time) bool {
+	return a.Year() == b.Year() && a.Month() == b.Month() && a.Day() == b.Day()
 }
 
 func (m model) isEditing() bool {
@@ -1243,6 +1422,7 @@ var (
 
 	subtitleStyle = lipgloss.NewStyle().Foreground(muted)
 	mutedStyle    = lipgloss.NewStyle().Foreground(muted)
+	timestampStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("242"))
 	accentStyle   = lipgloss.NewStyle().Foreground(accent).Bold(true)
 	openBoxStyle  = lipgloss.NewStyle().Foreground(accent)
 	doneBoxStyle  = lipgloss.NewStyle().Foreground(doneColor)
@@ -1456,7 +1636,7 @@ var inputStyle = lipgloss.NewStyle().
 var inputInlineStyle = lipgloss.NewStyle().
 	Foreground(foreground)
 
-func renderInputRow(input string, cursorPos int, checkbox string, padded bool) string {
+func renderInputRow(input string, cursorPos int, checkbox string, padded bool, width int) string {
 	runes := []rune(input)
 	if cursorPos < 0 {
 		cursorPos = 0
@@ -1469,6 +1649,7 @@ func renderInputRow(input string, cursorPos int, checkbox string, padded bool) s
 	if padded {
 		text = inputStyle.Render(content)
 	}
+	text = truncateStyledText(text, availableDescriptionWidth(width, true, ""))
 	return renderSelectedRow(accentStyle.Render("->"), checkbox, text)
 }
 
