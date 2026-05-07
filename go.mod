@@ -1,4 +1,4 @@
-module td
+module github.com/andreas-taranetz/td
 
 go 1.24.0
 

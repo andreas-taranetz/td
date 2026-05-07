@@ -6,16 +6,18 @@ Warning: 100% vibe coded.
 
 ## Install
 
-Install with Go:
+Install directly from GitHub:
 
 ```bash
-go install .
+go install github.com/andreas-taranetz/td@latest
 ```
 
-If you publish this repository, users can install it with:
+Or install from a local checkout after cloning the repository:
 
 ```bash
-go install github.com/yourname/td@latest
+git clone https://github.com/andreas-taranetz/td.git
+cd td
+go install .
 ```
 
 By default this installs the binary into `$(go env GOPATH)/bin` unless `GOBIN` is set.
@@ -26,7 +28,7 @@ For most setups that means:
 ~/go/bin
 ```
 
-If that directory is not already on your `PATH`, add:
+If that directory is not already on your `PATH`, add it in your shell config file such as `.zshrc` or `.bashrc`:
 
 ```bash
 export PATH="$HOME/go/bin:$PATH"
@@ -39,8 +41,8 @@ Then reload your shell.
 ```bash
 td --help
 td
-td "buy milk"
-td -t "pay rent"
+td "vibe features"
+td -t "fix bugs"
 td -l
 td -la
 ```
