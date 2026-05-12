@@ -854,7 +854,7 @@ func TestDirectionalAddDownSavesAndContinuesOnDown(t *testing.T) {
 	next.input = "third"
 	next.inputCursor = len([]rune(next.input))
 
-	updated, cmd := next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	updated, cmd := next.Update(tea.KeyMsg{Type: tea.KeyDown})
 	if cmd != nil {
 		t.Fatal("expected no command when chaining directional add")
 	}
@@ -908,7 +908,7 @@ func TestDirectionalAddDownCancelsOnUp(t *testing.T) {
 	next.input = "discard me"
 	next.inputCursor = len([]rune(next.input))
 
-	updated, cmd := next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	updated, cmd := next.Update(tea.KeyMsg{Type: tea.KeyUp})
 	if cmd != nil {
 		t.Fatal("expected no command when cancelling directional add")
 	}
@@ -983,7 +983,7 @@ func TestDirectionalAddUpSavesAndContinuesOnUp(t *testing.T) {
 	next.input = "zero"
 	next.inputCursor = len([]rune(next.input))
 
-	updated, cmd := next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	updated, cmd := next.Update(tea.KeyMsg{Type: tea.KeyUp})
 	if cmd != nil {
 		t.Fatal("expected no command when chaining upward directional add")
 	}
@@ -1028,7 +1028,7 @@ func TestDirectionalAddUpCancelsOnDown(t *testing.T) {
 	next.input = "discard top"
 	next.inputCursor = len([]rune(next.input))
 
-	updated, cmd := next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	updated, cmd := next.Update(tea.KeyMsg{Type: tea.KeyDown})
 	if cmd != nil {
 		t.Fatal("expected no command when cancelling upward directional add")
 	}
@@ -1044,6 +1044,83 @@ func TestDirectionalAddUpCancelsOnDown(t *testing.T) {
 	}
 	if cancelled.directionalNewItem != 0 {
 		t.Fatalf("expected directional marker reset, got %d", cancelled.directionalNewItem)
+	}
+}
+
+func TestDirectionalAddTypingJAndKDoesNotTriggerBindings(t *testing.T) {
+	tempDir := t.TempDir()
+	location := storeLocation{Path: filepath.Join(tempDir, ".todos"), Scope: storeScopeLocal, SourceText: "local .todos"}
+	m := newModel(store{Items: []todo{{Description: "first"}, {Description: "second"}}}, location)
+	m.cursor = 1
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	next := updated.(model)
+
+	updated, cmd := next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	if cmd != nil {
+		t.Fatal("expected no command when typing j in new-item input")
+	}
+	typing, ok := updated.(model)
+	if !ok {
+		t.Fatalf("expected model result, got %T", updated)
+	}
+	if !typing.isEditing() {
+		t.Fatal("expected to remain in edit mode after typing j")
+	}
+	if typing.input != "j" {
+		t.Fatalf("expected typed j in input, got %q", typing.input)
+	}
+	if typing.directionalNewItem != 1 {
+		t.Fatalf("expected directional marker to remain set, got %d", typing.directionalNewItem)
+	}
+
+	updated, cmd = typing.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	if cmd != nil {
+		t.Fatal("expected no command when typing k in new-item input")
+	}
+	typing, ok = updated.(model)
+	if !ok {
+		t.Fatalf("expected model result, got %T", updated)
+	}
+	if typing.input != "jk" {
+		t.Fatalf("expected typed jk in input, got %q", typing.input)
+	}
+}
+
+func TestDirectionalAddArrowKeysStillChain(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	tempDir := t.TempDir()
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatalf("chdir temp dir: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(wd)
+	}()
+	location := storeLocation{Path: filepath.Join(tempDir, ".todos"), Scope: storeScopeLocal, SourceText: "local .todos"}
+	m := newModel(store{Items: []todo{{Description: "first"}, {Description: "second"}}}, location)
+	m.cursor = 1
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	next := updated.(model)
+	next.input = "third"
+	next.inputCursor = len([]rune(next.input))
+
+	updated, cmd := next.Update(tea.KeyMsg{Type: tea.KeyDown})
+	if cmd != nil {
+		t.Fatal("expected no command when chaining directional add with down arrow")
+	}
+	chained, ok := updated.(model)
+	if !ok {
+		t.Fatalf("expected model result, got %T", updated)
+	}
+	if len(chained.store.Items) != 3 || chained.store.Items[2].Description != "third" {
+		t.Fatalf("expected saved third item, got %#v", chained.store.Items)
+	}
+	if chained.editMode != editModeNewBelow {
+		t.Fatalf("expected to continue in new-below edit mode, got %v", chained.editMode)
 	}
 }
 

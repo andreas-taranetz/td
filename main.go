@@ -757,10 +757,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		if m.isEditing() {
 			if m.isDirectionalNewItemEdit() {
-				switch {
-				case key.Matches(msg, keys.Up):
+				switch msg.Type {
+				case tea.KeyUp:
 					return m.handleDirectionalEditKey(-1)
-				case key.Matches(msg, keys.Down):
+				case tea.KeyDown:
 					return m.handleDirectionalEditKey(1)
 				}
 			}
