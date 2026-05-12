@@ -932,6 +932,37 @@ func TestDirectionalAddDownCancelsOnUp(t *testing.T) {
 	}
 }
 
+func TestHideDoneKeepsCursorOnSameOpenTask(t *testing.T) {
+	tempDir := t.TempDir()
+	location := storeLocation{Path: filepath.Join(tempDir, ".todos"), Scope: storeScopeLocal, SourceText: "local .todos"}
+	m := newModel(store{Items: []todo{
+		{Description: "open first"},
+		{Description: "done", Done: true, DoneAt: time.Now()},
+		{Description: "open keep"},
+		{Description: "open last"},
+	}}, location)
+	m.cursor = 2
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'H'}})
+	if cmd != nil {
+		t.Fatal("expected no command when toggling done visibility")
+	}
+	next, ok := updated.(model)
+	if !ok {
+		t.Fatalf("expected model result, got %T", updated)
+	}
+	if next.showAll {
+		t.Fatal("expected done items to be hidden")
+	}
+	visible := next.visibleIndexes()
+	if next.cursor != 1 {
+		t.Fatalf("expected cursor to move to filtered row 1, got %d", next.cursor)
+	}
+	if visible[next.cursor] != 2 {
+		t.Fatalf("expected cursor to stay on item 2, got item %d", visible[next.cursor])
+	}
+}
+
 func TestDirectionalAddUpSavesAndContinuesOnUp(t *testing.T) {
 	wd, err := os.Getwd()
 	if err != nil {

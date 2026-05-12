@@ -856,13 +856,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case key.Matches(msg, keys.ToggleAll):
 			m.pendingG = false
+			selectedIdx := -1
+			visible := m.visibleIndexes()
+			if m.cursor >= 0 && m.cursor < len(visible) {
+				selectedIdx = visible[m.cursor]
+			}
 			m.showAll = !m.showAll
 			m.store.HideDoneInTUI = !m.showAll
 			if err := saveStore(m.location.Path, m.store); err != nil {
 				m.err = err
 				return m, tea.Quit
 			}
-			m.clampCursor()
+			if selectedIdx >= 0 && (m.showAll || !m.store.Items[selectedIdx].Done) {
+				m.cursor = m.cursorForIndex(selectedIdx)
+			} else {
+				m.clampCursor()
+			}
 		case key.Matches(msg, keys.Toggle):
 			m.pendingG = false
 			cmd, err := m.toggleCurrent()
