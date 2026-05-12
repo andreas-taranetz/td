@@ -4,6 +4,8 @@ Simple terminal todo manager built with Go and Bubble Tea.
 
 Warning: 100% vibe coded.
 
+![](usage.gif)
+
 ## Install
 
 Install directly from GitHub:
