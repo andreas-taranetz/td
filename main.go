@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -58,6 +59,7 @@ const (
 	actionAdd
 	actionList
 	actionListAll
+	actionDelete
 	actionHelp
 )
 
@@ -78,6 +80,7 @@ type runOptions struct {
 	storage     storageMode
 	addArgs     []string
 	sawPosition bool
+	deleteIndex int
 }
 
 type storeLocation struct {
@@ -122,6 +125,8 @@ func run(args []string) error {
 		return printTodos(s, true, location)
 	case actionAdd:
 		return runAdd(opts.addArgs, opts.position, s, location)
+	case actionDelete:
+		return runDelete(opts.deleteIndex, s, location)
 	default:
 		return runInteractive(s, location)
 	}
@@ -135,7 +140,8 @@ func parseArgs(args []string) (runOptions, error) {
 		addArgs:  make([]string, 0, len(args)),
 	}
 
-	for _, arg := range args {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
 		switch arg {
 		case "-l", "--list":
 			if len(opts.addArgs) > 0 {
@@ -164,15 +170,41 @@ func parseArgs(args []string) (runOptions, error) {
 				return runOptions{}, errors.New("help flag cannot be combined with other arguments")
 			}
 			opts.action = actionHelp
+		case "-d", "--delete":
+			if opts.action != actionInteractive {
+				return runOptions{}, errors.New("delete flag cannot be combined with other action flags")
+			}
+			if len(opts.addArgs) > 0 {
+				return runOptions{}, errors.New("delete flag cannot be combined with todo text")
+			}
+			if opts.sawPosition {
+				return runOptions{}, errors.New("delete flag cannot be combined with add position flags")
+			}
+			if i+1 >= len(args) {
+				return runOptions{}, errors.New("delete flag requires an index argument")
+			}
+			i++
+			n, err := strconv.Atoi(args[i])
+			if err != nil || n < 1 {
+				return runOptions{}, fmt.Errorf("delete index must be a positive integer, got %q", args[i])
+			}
+			opts.action = actionDelete
+			opts.deleteIndex = n
 		case "-t", "--top":
 			if opts.action == actionList || opts.action == actionListAll {
 				return runOptions{}, errors.New("add position flags cannot be combined with list flags")
+			}
+			if opts.action == actionDelete {
+				return runOptions{}, errors.New("add position flags cannot be combined with delete flag")
 			}
 			opts.position = addTop
 			opts.sawPosition = true
 		case "-b", "--bottom":
 			if opts.action == actionList || opts.action == actionListAll {
 				return runOptions{}, errors.New("add position flags cannot be combined with list flags")
+			}
+			if opts.action == actionDelete {
+				return runOptions{}, errors.New("add position flags cannot be combined with delete flag")
 			}
 			opts.position = addBottom
 			opts.sawPosition = true
@@ -195,6 +227,9 @@ func parseArgs(args []string) (runOptions, error) {
 			}
 			if opts.action == actionListAll {
 				return runOptions{}, errors.New("list-all flag cannot be combined with todo text")
+			}
+			if opts.action == actionDelete {
+				return runOptions{}, errors.New("delete flag cannot be combined with todo text")
 			}
 			opts.addArgs = append(opts.addArgs, arg)
 		}
@@ -222,6 +257,28 @@ func runAdd(args []string, position addPosition, s store, location storeLocation
 	} else {
 		s.Items = append(s.Items, item)
 	}
+
+	if err := saveStore(location.Path, s); err != nil {
+		return err
+	}
+
+	return printTodos(s, false, location)
+}
+
+func runDelete(index int, s store, location storeLocation) error {
+	open := make([]int, 0, len(s.Items))
+	for i, item := range s.Items {
+		if !item.Done {
+			open = append(open, i)
+		}
+	}
+
+	if index < 1 || index > len(open) {
+		return fmt.Errorf("no item %d (have %d open)", index, len(open))
+	}
+
+	itemIndex := open[index-1]
+	s.Items = append(s.Items[:itemIndex], s.Items[itemIndex+1:]...)
 
 	if err := saveStore(location.Path, s); err != nil {
 		return err
@@ -330,6 +387,7 @@ func printHelp() {
 	fmt.Printf("  %s -t \"buy milk\"   add a todo at the top\n", cmd)
 	fmt.Printf("  %s -l              list open todos\n", cmd)
 	fmt.Printf("  %s -la             list all todos\n", cmd)
+	fmt.Printf("  %s -d 2            delete open todo #2\n", cmd)
 	fmt.Printf("  %s -H -l           list local todos from ./.todos\n", cmd)
 	fmt.Printf("  %s -g -l           list global todos\n", cmd)
 	fmt.Println()

@@ -1124,6 +1124,174 @@ func TestDirectionalAddArrowKeysStillChain(t *testing.T) {
 	}
 }
 
+func TestParseArgsDelete(t *testing.T) {
+	opts, err := parseArgs([]string{"-d", "3"})
+	if err != nil {
+		t.Fatalf("parseArgs returned error: %v", err)
+	}
+	if opts.action != actionDelete {
+		t.Fatalf("expected actionDelete, got %v", opts.action)
+	}
+	if opts.deleteIndex != 3 {
+		t.Fatalf("expected deleteIndex 3, got %d", opts.deleteIndex)
+	}
+}
+
+func TestParseArgsDeleteLongFlag(t *testing.T) {
+	opts, err := parseArgs([]string{"--delete", "1"})
+	if err != nil {
+		t.Fatalf("parseArgs returned error: %v", err)
+	}
+	if opts.action != actionDelete {
+		t.Fatalf("expected actionDelete, got %v", opts.action)
+	}
+	if opts.deleteIndex != 1 {
+		t.Fatalf("expected deleteIndex 1, got %d", opts.deleteIndex)
+	}
+}
+
+func TestParseArgsDeleteWithStorage(t *testing.T) {
+	opts, err := parseArgs([]string{"-g", "-d", "2"})
+	if err != nil {
+		t.Fatalf("parseArgs returned error: %v", err)
+	}
+	if opts.action != actionDelete {
+		t.Fatalf("expected actionDelete, got %v", opts.action)
+	}
+	if opts.storage != storageGlobal {
+		t.Fatalf("expected storageGlobal, got %v", opts.storage)
+	}
+	if opts.deleteIndex != 2 {
+		t.Fatalf("expected deleteIndex 2, got %d", opts.deleteIndex)
+	}
+}
+
+func TestParseArgsDeleteRejectsMissingIndex(t *testing.T) {
+	if _, err := parseArgs([]string{"-d"}); err == nil {
+		t.Fatal("expected error for missing delete index")
+	}
+}
+
+func TestParseArgsDeleteRejectsInvalidIndex(t *testing.T) {
+	if _, err := parseArgs([]string{"-d", "abc"}); err == nil {
+		t.Fatal("expected error for non-integer delete index")
+	}
+	if _, err := parseArgs([]string{"-d", "0"}); err == nil {
+		t.Fatal("expected error for zero delete index")
+	}
+	if _, err := parseArgs([]string{"-d", "-1"}); err == nil {
+		t.Fatal("expected error for negative delete index")
+	}
+}
+
+func TestParseArgsDeleteRejectsCombinations(t *testing.T) {
+	if _, err := parseArgs([]string{"-d", "1", "-l"}); err == nil {
+		t.Fatal("expected error combining delete with list")
+	}
+	if _, err := parseArgs([]string{"-l", "-d", "1"}); err == nil {
+		t.Fatal("expected error combining list with delete")
+	}
+	if _, err := parseArgs([]string{"-d", "1", "some text"}); err == nil {
+		t.Fatal("expected error combining delete with todo text")
+	}
+	if _, err := parseArgs([]string{"-t", "-d", "1"}); err == nil {
+		t.Fatal("expected error combining delete with position flag")
+	}
+}
+
+func TestRunDeleteRemovesOpenItem(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	tempDir := t.TempDir()
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatalf("chdir temp dir: %v", err)
+	}
+	defer func() { _ = os.Chdir(wd) }()
+
+	storePath := filepath.Join(tempDir, ".todos")
+	s := store{Items: []todo{
+		{Description: "first"},
+		{Description: "second"},
+		{Description: "third"},
+	}}
+	if err := saveStore(storePath, s); err != nil {
+		t.Fatalf("save store: %v", err)
+	}
+	location := storeLocation{Path: storePath, Scope: storeScopeLocal, SourceText: "local .todos"}
+
+	if err := runDelete(2, s, location); err != nil {
+		t.Fatalf("runDelete: %v", err)
+	}
+
+	saved, _, err := loadStore(storageHere)
+	if err != nil {
+		t.Fatalf("load store: %v", err)
+	}
+	if len(saved.Items) != 2 {
+		t.Fatalf("expected 2 items after delete, got %d", len(saved.Items))
+	}
+	if saved.Items[0].Description != "first" || saved.Items[1].Description != "third" {
+		t.Fatalf("expected first and third items, got %#v", saved.Items)
+	}
+}
+
+func TestRunDeleteSkipsDoneItems(t *testing.T) {
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	tempDir := t.TempDir()
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatalf("chdir temp dir: %v", err)
+	}
+	defer func() { _ = os.Chdir(wd) }()
+
+	storePath := filepath.Join(tempDir, ".todos")
+	s := store{Items: []todo{
+		{Description: "open first"},
+		{Description: "done item", Done: true},
+		{Description: "open second"},
+	}}
+	if err := saveStore(storePath, s); err != nil {
+		t.Fatalf("save store: %v", err)
+	}
+	location := storeLocation{Path: storePath, Scope: storeScopeLocal, SourceText: "local .todos"}
+
+	if err := runDelete(2, s, location); err != nil {
+		t.Fatalf("runDelete: %v", err)
+	}
+
+	saved, _, err := loadStore(storageHere)
+	if err != nil {
+		t.Fatalf("load store: %v", err)
+	}
+	if len(saved.Items) != 2 {
+		t.Fatalf("expected 2 items after delete, got %d", len(saved.Items))
+	}
+	if saved.Items[0].Description != "open first" || saved.Items[1].Description != "done item" {
+		t.Fatalf("expected open first and done item to remain, got %#v", saved.Items)
+	}
+}
+
+func TestRunDeleteRejectsOutOfRange(t *testing.T) {
+	tempDir := t.TempDir()
+	storePath := filepath.Join(tempDir, ".todos")
+	s := store{Items: []todo{{Description: "only one"}}}
+	if err := saveStore(storePath, s); err != nil {
+		t.Fatalf("save store: %v", err)
+	}
+	location := storeLocation{Path: storePath, Scope: storeScopeLocal, SourceText: "local .todos"}
+
+	if err := runDelete(2, s, location); err == nil {
+		t.Fatal("expected error for out-of-range delete index")
+	}
+	if err := runDelete(0, s, location); err == nil {
+		t.Fatal("expected error for zero delete index")
+	}
+}
+
 func TestFormatRelativeTaskTime(t *testing.T) {
 	now := time.Date(2026, time.May, 7, 15, 30, 0, 0, time.UTC)
 	tests := []struct {

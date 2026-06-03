@@ -50,6 +50,7 @@ td -H -l
 td -g -l
 td -l
 td -la
+td -d 2
 ```
 
 - `td` opens interactive mode
@@ -61,6 +62,7 @@ td -la
 - `td -g` or `td --global` forces the global store even when `./.todos` exists
 - `td -l` or `td --list` lists open items
 - `td -la` or `td --list-all` lists all items including done ones
+- `td -d <N>` or `td --delete <N>` deletes open item #N (matches numbering from `td -l`)
 
 After non-interactive add commands, the current open todo list is printed in a formatted, colorized view.
 Open-only output omits checkboxes; `-la` includes them.
