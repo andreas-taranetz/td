@@ -51,6 +51,7 @@ td -g -l
 td -l
 td -la
 td -d 2
+td -p -l
 ```
 
 - `td` opens interactive mode
@@ -63,6 +64,7 @@ td -d 2
 - `td -l` or `td --list` lists open items
 - `td -la` or `td --list-all` lists all items including done ones
 - `td -d <N>` or `td --delete <N>` deletes open item #N (matches numbering from `td -l`)
+- `td -p` or `td --plain` outputs a plain numbered list — no colors, no timestamps, no header; useful for piping or agent use
 
 After non-interactive add commands, the current open todo list is printed in a formatted, colorized view.
 Open-only output omits checkboxes; `-la` includes them.

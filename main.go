@@ -81,6 +81,7 @@ type runOptions struct {
 	addArgs     []string
 	sawPosition bool
 	deleteIndex int
+	plain       bool
 }
 
 type storeLocation struct {
@@ -120,13 +121,13 @@ func run(args []string) error {
 
 	switch opts.action {
 	case actionList:
-		return printTodos(s, false, location)
+		return printTodos(s, false, opts.plain, location)
 	case actionListAll:
-		return printTodos(s, true, location)
+		return printTodos(s, true, opts.plain, location)
 	case actionAdd:
-		return runAdd(opts.addArgs, opts.position, s, location)
+		return runAdd(opts.addArgs, opts.position, opts.plain, s, location)
 	case actionDelete:
-		return runDelete(opts.deleteIndex, s, location)
+		return runDelete(opts.deleteIndex, opts.plain, s, location)
 	default:
 		return runInteractive(s, location)
 	}
@@ -208,6 +209,8 @@ func parseArgs(args []string) (runOptions, error) {
 			}
 			opts.position = addBottom
 			opts.sawPosition = true
+		case "-p", "--plain":
+			opts.plain = true
 		case "-H", "--here":
 			if opts.storage == storageGlobal {
 				return runOptions{}, errors.New("here and global flags cannot be combined")
@@ -242,7 +245,7 @@ func parseArgs(args []string) (runOptions, error) {
 	return opts, nil
 }
 
-func runAdd(args []string, position addPosition, s store, location storeLocation) error {
+func runAdd(args []string, position addPosition, plain bool, s store, location storeLocation) error {
 	description := strings.TrimSpace(strings.Join(args, " "))
 	if description == "" {
 		return errors.New("todo description cannot be empty")
@@ -262,10 +265,10 @@ func runAdd(args []string, position addPosition, s store, location storeLocation
 		return err
 	}
 
-	return printTodos(s, false, location)
+	return printTodos(s, false, plain, location)
 }
 
-func runDelete(index int, s store, location storeLocation) error {
+func runDelete(index int, plain bool, s store, location storeLocation) error {
 	open := make([]int, 0, len(s.Items))
 	for i, item := range s.Items {
 		if !item.Done {
@@ -284,10 +287,10 @@ func runDelete(index int, s store, location storeLocation) error {
 		return err
 	}
 
-	return printTodos(s, false, location)
+	return printTodos(s, false, plain, location)
 }
 
-func printTodos(s store, showAll bool, location storeLocation) error {
+func printTodos(s store, showAll bool, plain bool, location storeLocation) error {
 	visible := make([]todo, 0, len(s.Items))
 	for _, item := range s.Items {
 		if !showAll && item.Done {
@@ -300,6 +303,19 @@ func printTodos(s store, showAll bool, location storeLocation) error {
 	indexWidth := len(fmt.Sprintf("%d", count))
 	if indexWidth < 1 {
 		indexWidth = 1
+	}
+
+	if plain {
+		n := 1
+		for _, item := range visible {
+			if showAll && item.Done {
+				fmt.Printf("%d. [done] %s\n", n, item.Description)
+			} else {
+				fmt.Printf("%d. %s\n", n, item.Description)
+			}
+			n++
+		}
+		return nil
 	}
 
 	var b strings.Builder
@@ -390,6 +406,7 @@ func printHelp() {
 	fmt.Printf("  %s -d 2            delete open todo #2\n", cmd)
 	fmt.Printf("  %s -H -l           list local todos from ./.todos\n", cmd)
 	fmt.Printf("  %s -g -l           list global todos\n", cmd)
+	fmt.Printf("  %s -p -l           plain output (no colors/timestamps)\n", cmd)
 	fmt.Println()
 	fmt.Println("Interactive controls:")
 	fmt.Println("  j/down   move down")

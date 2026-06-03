@@ -1221,7 +1221,7 @@ func TestRunDeleteRemovesOpenItem(t *testing.T) {
 	}
 	location := storeLocation{Path: storePath, Scope: storeScopeLocal, SourceText: "local .todos"}
 
-	if err := runDelete(2, s, location); err != nil {
+	if err := runDelete(2, false, s, location); err != nil {
 		t.Fatalf("runDelete: %v", err)
 	}
 
@@ -1259,7 +1259,7 @@ func TestRunDeleteSkipsDoneItems(t *testing.T) {
 	}
 	location := storeLocation{Path: storePath, Scope: storeScopeLocal, SourceText: "local .todos"}
 
-	if err := runDelete(2, s, location); err != nil {
+	if err := runDelete(2, false, s, location); err != nil {
 		t.Fatalf("runDelete: %v", err)
 	}
 
@@ -1284,10 +1284,10 @@ func TestRunDeleteRejectsOutOfRange(t *testing.T) {
 	}
 	location := storeLocation{Path: storePath, Scope: storeScopeLocal, SourceText: "local .todos"}
 
-	if err := runDelete(2, s, location); err == nil {
+	if err := runDelete(2, false, s, location); err == nil {
 		t.Fatal("expected error for out-of-range delete index")
 	}
-	if err := runDelete(0, s, location); err == nil {
+	if err := runDelete(0, false, s, location); err == nil {
 		t.Fatal("expected error for zero delete index")
 	}
 }
