@@ -257,7 +257,7 @@ func TestHideDoneKeepsCursorOnSameOpenTask(t *testing.T) {
 	}}, location)
 	m.cursor = 2
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'H'}})
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h'}})
 	if cmd != nil {
 		t.Fatal("expected no command when toggling done visibility")
 	}

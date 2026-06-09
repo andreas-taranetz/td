@@ -825,7 +825,7 @@ func (m model) View() string {
 
 	if len(m.store.Items) == 0 {
 		if m.isEditing() {
-			b.WriteString(renderInputRow(m.input, m.inputCursor, openBoxStyle.Background(background).Render("[ ]"), false, m.contentWidth()))
+			b.WriteString(renderInputRow(m.input, m.inputCursor, openBoxStyle.Background(background).Render("[ ]"), m.contentWidth()))
 			b.WriteString("\n")
 			b.WriteString(mutedStyle.Render(m.editModeHelp()))
 		} else {
@@ -839,7 +839,7 @@ func (m model) View() string {
 	visible := m.visibleIndexes()
 	if len(visible) == 0 {
 		if m.isEditing() {
-			b.WriteString(renderInputRow(m.input, m.inputCursor, openBoxStyle.Background(background).Render("[ ]"), false, m.contentWidth()))
+			b.WriteString(renderInputRow(m.input, m.inputCursor, openBoxStyle.Background(background).Render("[ ]"), m.contentWidth()))
 			b.WriteString("\n")
 			b.WriteString(mutedStyle.Render(m.editModeHelp()))
 			b.WriteString("\n\n")
@@ -859,7 +859,7 @@ func (m model) View() string {
 	contentWidth := m.contentWidth()
 	for row := 0; row < len(visible); row++ {
 		if row == insertRow {
-			b.WriteString(renderInputRow(m.input, m.inputCursor, openBoxStyle.Background(background).Render("[ ]"), false, contentWidth))
+			b.WriteString(renderInputRow(m.input, m.inputCursor, openBoxStyle.Background(background).Render("[ ]"), contentWidth))
 			b.WriteString("\n")
 		}
 
@@ -869,7 +869,7 @@ func (m model) View() string {
 			if m.store.Items[idx].Done {
 				checkbox = doneBoxStyle.Background(background).Render("[✓]")
 			}
-			b.WriteString(renderInputRow(m.input, m.inputCursor, checkbox, false, contentWidth))
+			b.WriteString(renderInputRow(m.input, m.inputCursor, checkbox, contentWidth))
 			b.WriteString("\n")
 			continue
 		}
@@ -894,7 +894,7 @@ func (m model) View() string {
 	}
 
 	if m.isEditingNewItem() && insertRow == len(visible) {
-		b.WriteString(renderInputRow(m.input, m.inputCursor, openBoxStyle.Background(background).Render("[ ]"), false, contentWidth))
+		b.WriteString(renderInputRow(m.input, m.inputCursor, openBoxStyle.Background(background).Render("[ ]"), contentWidth))
 		b.WriteString("\n")
 	}
 
@@ -1484,19 +1484,14 @@ func (m *model) handleDirectionalEditKey(direction int) (tea.Model, tea.Cmd) {
 	return *m, nil
 }
 
-func cursorGlyph() string {
-	return accentStyle.Render("█")
-}
-
-var inputStyle = lipgloss.NewStyle().
-	Foreground(foreground).
-	Background(lipgloss.Color("238")).
-	Padding(0, 1)
-
 var inputInlineStyle = lipgloss.NewStyle().
 	Foreground(foreground)
 
-func renderInputRow(input string, cursorPos int, checkbox string, padded bool, width int) string {
+var inputCursorStyle = lipgloss.NewStyle().
+	Foreground(foreground).
+	Background(accent)
+
+func renderInputRow(input string, cursorPos int, checkbox string, width int) string {
 	runes := []rune(input)
 	if cursorPos < 0 {
 		cursorPos = 0
@@ -1504,12 +1499,31 @@ func renderInputRow(input string, cursorPos int, checkbox string, padded bool, w
 	if cursorPos > len(runes) {
 		cursorPos = len(runes)
 	}
-	content := string(runes[:cursorPos]) + cursorGlyph() + string(runes[cursorPos:])
-	text := inputInlineStyle.Render(content)
-	if padded {
-		text = inputStyle.Render(content)
+
+	maxWidth := availableDescriptionWidth(width, true, "")
+
+	// Scroll to keep cursor in view; at end-of-text reserve 1 cell for trailing cursor block.
+	scrollOffset := 0
+	if maxWidth > 0 && cursorPos >= maxWidth {
+		scrollOffset = cursorPos - maxWidth + 1
 	}
-	text = truncateStyledText(text, availableDescriptionWidth(width, true, ""))
+
+	vis := runes[scrollOffset:]
+	if len(vis) > maxWidth {
+		vis = vis[:maxWidth]
+	}
+	rel := cursorPos - scrollOffset
+
+	var text string
+	if rel < len(vis) {
+		before := inputInlineStyle.Render(string(vis[:rel]))
+		cursor := inputCursorStyle.Render(string(vis[rel : rel+1]))
+		after := inputInlineStyle.Render(string(vis[rel+1:]))
+		text = before + cursor + after
+	} else {
+		text = inputInlineStyle.Render(string(vis)) + inputCursorStyle.Render(" ")
+	}
+
 	return renderSelectedRow(accentStyle.Render("->"), checkbox, text)
 }
 
