@@ -449,7 +449,7 @@ func printHelp() {
 	fmt.Println("  x/enter  toggle done")
 	fmt.Println("  d        delete item")
 	fmt.Println("  D        delete all done")
-	fmt.Println("  H        hide done")
+	fmt.Println("  h        hide done")
 	fmt.Println("  q        quit")
 	fmt.Println()
 	fmt.Printf("Data file: %s\n", globalDataPath())
@@ -589,8 +589,8 @@ var keys = keyMap{
 		key.WithHelp("D", "delete all done"),
 	),
 	ToggleAll: key.NewBinding(
-		key.WithKeys("H"),
-		key.WithHelp("H", "show all/open"),
+		key.WithKeys("h"),
+		key.WithHelp("h", "show all/open"),
 	),
 	Quit: key.NewBinding(
 		key.WithKeys("q", "ctrl+c"),
