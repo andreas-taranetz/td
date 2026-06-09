@@ -91,6 +91,16 @@ When `td -H` creates a new local `.todos` inside a git checkout, td also shows w
 - `Esc`: cancel editing or add mode
 - `q`: quit
 
+## Claude Code skill
+
+Install the td skill for AI agents (Claude Code, etc.) so they can manage todos non-interactively:
+
+```bash
+npx skills add andreas-taranetz/td
+```
+
+This installs `.claude/skills/td/SKILL.md` which teaches agents to use `td` via flags only (`-p`, `-l`, `-d`, etc.) and never open the interactive TUI.
+
 ## Data storage
 
 td uses project-local storage first when `./.todos` exists in the current directory.
