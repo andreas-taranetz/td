@@ -62,6 +62,24 @@ Sleep 350ms
 Type "j"
 Sleep 350ms
 
+# Edit "fix context overflow" — show vim-style block cursor
+Type "i"
+Sleep 500ms
+Right
+Sleep 250ms
+Right
+Sleep 250ms
+Right
+Sleep 250ms
+Right
+Sleep 350ms
+Left
+Sleep 250ms
+Left
+Sleep 350ms
+Escape
+Sleep 600ms
+
 # Move "fix context overflow" down one position (J), then back up (K)
 Type "J"
 Sleep 500ms
