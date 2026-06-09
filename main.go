@@ -439,8 +439,6 @@ func printTodos(s store, showAll bool, plain bool, location storeLocation) error
 				}
 			}
 			b.WriteString(subtitleStyle.Render(fmt.Sprintf("%d items, %d done", count, done)))
-		} else {
-			b.WriteString(subtitleStyle.Render(fmt.Sprintf("%d open", count)))
 		}
 	}
 
