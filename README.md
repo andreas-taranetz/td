@@ -65,6 +65,7 @@ td -p -l
 - `td -la` or `td --list-all` lists all items including done ones
 - `td -d <N>` or `td --delete <N>` deletes open item #N (matches numbering from `td -l`)
 - `td -p` or `td --plain` outputs a plain numbered list — no colors, no timestamps, no header; useful for piping or agent use
+- `td --install-skill` installs the agent skill via `npx skills` (interactive agent selector)
 
 After non-interactive add commands, the current open todo list is printed in a formatted, colorized view.
 Open-only output omits checkboxes; `-la` includes them.
@@ -91,15 +92,15 @@ When `td -H` creates a new local `.todos` inside a git checkout, td also shows w
 - `Esc`: cancel editing or add mode
 - `q`: quit
 
-## Claude Code skill
+## Agent skill
 
-Install the td skill for AI agents (Claude Code, etc.) so they can manage todos non-interactively:
+Install the td skill so AI agents (Claude Code, Copilot, etc.) can manage todos non-interactively:
 
 ```bash
-npx skills add andreas-taranetz/td
+td --install-skill
 ```
 
-This installs `.claude/skills/td/SKILL.md` which teaches agents to use `td` via flags only (`-p`, `-l`, `-d`, etc.) and never open the interactive TUI.
+Writes the embedded `SKILL.md` to a temp dir and hands off to `npx skills` for agent selection. Requires `npx` (Node.js) on your PATH.
 
 ## Data storage
 

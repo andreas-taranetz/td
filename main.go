@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -61,6 +62,7 @@ const (
 	actionListAll
 	actionDelete
 	actionHelp
+	actionInstallSkill
 )
 
 const (
@@ -92,6 +94,73 @@ type storeLocation struct {
 	Notice     string
 }
 
+const skillMD = `---
+name: td
+description: use, add, list, delete, manage todos with td CLI — non-interactive flag usage
+---
+
+` + "`" + `td` + "`" + ` is a personal todo list CLI. Agents use it **non-interactively only** via flags. Always pass ` + "`" + `-p` + "`" + ` for plain, parseable output. Never run ` + "`" + `td` + "`" + ` without an action flag or positional arg — that opens a blocking interactive TUI.
+
+## Usage
+
+` + "```" + `bash
+# Add
+td -p "buy milk"           # add at bottom (default)
+td -p -t "urgent thing"   # add at top
+td -p -b "low priority"   # add at bottom
+
+# List
+td -p -l                  # list open todos
+td -p -la                 # list all (incl. done)
+
+# Delete
+td -p -d 1                # delete todo #1
+
+# Scope
+td -p -H -l               # use local .todos file in cwd
+td -p -g -l               # use global store
+` + "```" + `
+
+## Plain output format
+
+` + "```" + `
+1. buy milk
+2. urgent thing
+3. [done] finished task
+` + "```" + `
+
+No ANSI codes, no timestamps. Numbers are stable within a session — use ` + "`" + `-l` + "`" + ` output to find the index before ` + "`" + `-d N` + "`" + `.
+
+## Storage
+
+- Global: ` + "`" + `~/Library/Application Support/td/todos.json` + "`" + `
+- Local: ` + "`" + `.todos` + "`" + ` in cwd (active when that file exists, or when ` + "`" + `-H` + "`" + ` is passed)
+- ` + "`" + `-H` + "`" + ` forces local scope; ` + "`" + `-g` + "`" + ` forces global
+
+## Gotchas
+
+- ` + "`" + `td` + "`" + ` or ` + "`" + `td -H` + "`" + ` with no action → blocking TUI. Always pair with ` + "`" + `-l` + "`" + `, ` + "`" + `-la` + "`" + `, ` + "`" + `-d N` + "`" + `, or a positional arg.
+- Without ` + "`" + `-p` + "`" + `: ANSI color codes + timestamps in output → breaks grep/parsing.
+`
+
+func runInstallSkill() error {
+	dir, err := os.MkdirTemp("", "td-skill-*")
+	if err != nil {
+		return fmt.Errorf("create temp dir: %w", err)
+	}
+	defer os.RemoveAll(dir)
+
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(skillMD), 0644); err != nil {
+		return fmt.Errorf("write SKILL.md: %w", err)
+	}
+
+	cmd := exec.Command("npx", "skills", "add", dir)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
 func main() {
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -108,6 +177,10 @@ func run(args []string) error {
 	if opts.action == actionHelp {
 		printHelp()
 		return nil
+	}
+
+	if opts.action == actionInstallSkill {
+		return runInstallSkill()
 	}
 
 	if err := confirmLocalStoreCreationIfNeeded(opts.storage, os.Stdin, os.Stdout); err != nil {
@@ -209,6 +282,11 @@ func parseArgs(args []string) (runOptions, error) {
 			}
 			opts.position = addBottom
 			opts.sawPosition = true
+		case "--install-skill":
+			if len(args) != 1 {
+				return runOptions{}, errors.New("--install-skill cannot be combined with other arguments")
+			}
+			opts.action = actionInstallSkill
 		case "-p", "--plain":
 			opts.plain = true
 		case "-H", "--here":
@@ -407,6 +485,7 @@ func printHelp() {
 	fmt.Printf("  %s -H -l           list local todos from ./.todos\n", cmd)
 	fmt.Printf("  %s -g -l           list global todos\n", cmd)
 	fmt.Printf("  %s -p -l           plain output (no colors/timestamps)\n", cmd)
+	fmt.Printf("  %s --install-skill install Claude Code skill via npx skills\n", cmd)
 	fmt.Println()
 	fmt.Println("Interactive controls:")
 	fmt.Println("  j/down   move down")
