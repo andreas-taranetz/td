@@ -19,10 +19,6 @@ td -p -la                 # list all (incl. done)
 
 # Delete
 td -p -d 1                # delete todo #1
-
-# Scope
-td -p -H -l               # use local .todos file in cwd
-td -p -g -l               # use global store
 ```
 
 ## Plain output format
@@ -37,11 +33,9 @@ No ANSI codes, no timestamps. Numbers are stable within a session — use `-l` o
 
 ## Storage
 
-- Global: `~/Library/Application Support/td/todos.json`
-- Local: `.todos` in cwd (active when that file exists, or when `-H` is passed)
-- `-H` forces local scope; `-g` forces global
+- `~/Library/Application Support/td/todos.json`
 
 ## Gotchas
 
-- `td` or `td -H` with no action → blocking TUI. Always pair with `-l`, `-la`, `-d N`, or a positional arg.
+- `td` with no action → blocking TUI. Always pair with `-l`, `-la`, `-d N`, or a positional arg.
 - Without `-p`: ANSI color codes + timestamps in output → breaks grep/parsing.

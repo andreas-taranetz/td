@@ -1,11 +1,9 @@
 package main
 
 import (
-	"bufio"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -39,10 +37,6 @@ type editMode int
 
 type actionMode int
 
-type storageMode int
-
-type storeScope int
-
 const (
 	addBottom addPosition = iota
 	addTop
@@ -65,21 +59,9 @@ const (
 	actionInstallSkill
 )
 
-const (
-	storageAuto storageMode = iota
-	storageHere
-	storageGlobal
-)
-
-const (
-	storeScopeLocal storeScope = iota
-	storeScopeGlobal
-)
-
 type runOptions struct {
 	action      actionMode
 	position    addPosition
-	storage     storageMode
 	addArgs     []string
 	sawPosition bool
 	deleteIndex int
@@ -87,11 +69,7 @@ type runOptions struct {
 }
 
 type storeLocation struct {
-	Path       string
-	Scope      storeScope
-	SourceText string
-	Created    bool
-	Notice     string
+	Path string
 }
 
 const skillMD = `---
@@ -115,10 +93,6 @@ td -p -la                 # list all (incl. done)
 
 # Delete
 td -p -d 1                # delete todo #1
-
-# Scope
-td -p -H -l               # use local .todos file in cwd
-td -p -g -l               # use global store
 ` + "```" + `
 
 ## Plain output format
@@ -133,13 +107,11 @@ No ANSI codes, no timestamps. Numbers are stable within a session — use ` + "`
 
 ## Storage
 
-- Global: ` + "`" + `~/Library/Application Support/td/todos.json` + "`" + `
-- Local: ` + "`" + `.todos` + "`" + ` in cwd (active when that file exists, or when ` + "`" + `-H` + "`" + ` is passed)
-- ` + "`" + `-H` + "`" + ` forces local scope; ` + "`" + `-g` + "`" + ` forces global
+- ` + "`" + `~/Library/Application Support/td/todos.json` + "`" + `
 
 ## Gotchas
 
-- ` + "`" + `td` + "`" + ` or ` + "`" + `td -H` + "`" + ` with no action → blocking TUI. Always pair with ` + "`" + `-l` + "`" + `, ` + "`" + `-la` + "`" + `, ` + "`" + `-d N` + "`" + `, or a positional arg.
+- ` + "`" + `td` + "`" + ` with no action → blocking TUI. Always pair with ` + "`" + `-l` + "`" + `, ` + "`" + `-la` + "`" + `, ` + "`" + `-d N` + "`" + `, or a positional arg.
 - Without ` + "`" + `-p` + "`" + `: ANSI color codes + timestamps in output → breaks grep/parsing.
 `
 
@@ -183,11 +155,7 @@ func run(args []string) error {
 		return runInstallSkill()
 	}
 
-	if err := confirmLocalStoreCreationIfNeeded(opts.storage, os.Stdin, os.Stdout); err != nil {
-		return err
-	}
-
-	s, location, err := loadStore(opts.storage)
+	s, location, err := loadStore()
 	if err != nil {
 		return err
 	}
@@ -210,7 +178,6 @@ func parseArgs(args []string) (runOptions, error) {
 	opts := runOptions{
 		action:   actionInteractive,
 		position: addBottom,
-		storage:  storageAuto,
 		addArgs:  make([]string, 0, len(args)),
 	}
 
@@ -289,16 +256,6 @@ func parseArgs(args []string) (runOptions, error) {
 			opts.action = actionInstallSkill
 		case "-p", "--plain":
 			opts.plain = true
-		case "-H", "--here":
-			if opts.storage == storageGlobal {
-				return runOptions{}, errors.New("here and global flags cannot be combined")
-			}
-			opts.storage = storageHere
-		case "-g", "--global":
-			if opts.storage == storageHere {
-				return runOptions{}, errors.New("here and global flags cannot be combined")
-			}
-			opts.storage = storageGlobal
 		default:
 			if strings.HasPrefix(arg, "-") {
 				return runOptions{}, fmt.Errorf("unknown flag: %s", arg)
@@ -312,7 +269,8 @@ func parseArgs(args []string) (runOptions, error) {
 			if opts.action == actionDelete {
 				return runOptions{}, errors.New("delete flag cannot be combined with todo text")
 			}
-			opts.addArgs = append(opts.addArgs, arg)
+			opts.addArgs = append(opts.addArgs, args[i:]...)
+			i = len(args)
 		}
 	}
 
@@ -397,12 +355,8 @@ func printTodos(s store, showAll bool, plain bool, location storeLocation) error
 	}
 
 	var b strings.Builder
-	b.WriteString(titleStyle.Render(todoTitle(location)))
+	b.WriteString(titleStyle.Render("Todo:"))
 	b.WriteString("\n")
-	if location.Notice != "" {
-		b.WriteString(subtitleStyle.Render(renderLocationNotice(location.Notice)))
-		b.WriteString("\n")
-	}
 	b.WriteString("\n")
 	now := time.Now()
 	listWidth := 0
@@ -473,15 +427,11 @@ func printHelp() {
 	fmt.Println("Usage:")
 	fmt.Printf("  %s                 open interactive mode\n", cmd)
 	fmt.Printf("  %s --help          show help\n", cmd)
-	fmt.Printf("  %s -H              create and use ./.todos\n", cmd)
-	fmt.Printf("  %s -g              force the global todo store\n", cmd)
 	fmt.Printf("  %s \"buy milk\"      add a todo at the bottom\n", cmd)
 	fmt.Printf("  %s -t \"buy milk\"   add a todo at the top\n", cmd)
 	fmt.Printf("  %s -l              list open todos\n", cmd)
 	fmt.Printf("  %s -la             list all todos\n", cmd)
 	fmt.Printf("  %s -d 2            delete open todo #2\n", cmd)
-	fmt.Printf("  %s -H -l           list local todos from ./.todos\n", cmd)
-	fmt.Printf("  %s -g -l           list global todos\n", cmd)
 	fmt.Printf("  %s -p -l           plain output (no colors/timestamps)\n", cmd)
 	fmt.Printf("  %s --install-skill install Claude Code skill via npx skills\n", cmd)
 	fmt.Println()
@@ -502,36 +452,7 @@ func printHelp() {
 	fmt.Println("  H        hide done")
 	fmt.Println("  q        quit")
 	fmt.Println()
-	fmt.Printf("Global data file: %s\n", globalDataPath())
-	fmt.Println("Local project file: ./.todos")
-}
-
-func renderLocationNotice(notice string) string {
-	return notice
-}
-
-func todoTitle(location storeLocation) string {
-	source := titleSourceText(location)
-	if source == "" {
-		return "Todo:"
-	}
-	return fmt.Sprintf("Todo (%s):", source)
-}
-
-func titleSourceText(location storeLocation) string {
-	if location.Scope == storeScopeLocal {
-		return "local"
-	}
-
-	localPath, err := localDataPath()
-	if err != nil {
-		return ""
-	}
-	if _, err := os.Stat(localPath); err == nil {
-		return "global"
-	}
-
-	return ""
+	fmt.Printf("Data file: %s\n", globalDataPath())
 }
 
 func commandName() string {
@@ -550,59 +471,8 @@ func globalDataPath() string {
 	return filepath.Join(base, "td", "todos.json")
 }
 
-func localDataPath() (string, error) {
-	cwd, err := os.Getwd()
-	if err != nil {
-		return "", fmt.Errorf("resolve current directory: %w", err)
-	}
-	return filepath.Join(cwd, ".todos"), nil
-}
-
-func confirmLocalStoreCreationIfNeeded(mode storageMode, in io.Reader, out io.Writer) error {
-	if mode != storageHere {
-		return nil
-	}
-
-	path, err := localDataPath()
-	if err != nil {
-		return err
-	}
-	if _, err := os.Stat(path); err == nil {
-		return nil
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("check local todos: %w", err)
-	}
-
-	ok, err := confirmLocalStoreCreation(in, out)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return errors.New("local .todos creation canceled")
-	}
-
-	return nil
-}
-
-func confirmLocalStoreCreation(in io.Reader, out io.Writer) (bool, error) {
-	if _, err := fmt.Fprint(out, "Create .todos file? [y/N]: "); err != nil {
-		return false, fmt.Errorf("write confirmation prompt: %w", err)
-	}
-
-	response, err := bufio.NewReader(in).ReadString('\n')
-	if err != nil && !errors.Is(err, io.EOF) {
-		return false, fmt.Errorf("read confirmation: %w", err)
-	}
-
-	response = strings.TrimSpace(strings.ToLower(response))
-	return response == "y" || response == "yes", nil
-}
-
-func loadStore(mode storageMode) (store, storeLocation, error) {
-	location, err := resolveStoreLocation(mode)
-	if err != nil {
-		return store{}, storeLocation{}, err
-	}
+func loadStore() (store, storeLocation, error) {
+	location := storeLocation{Path: globalDataPath()}
 
 	data, err := os.ReadFile(location.Path)
 	if err != nil {
@@ -618,90 +488,6 @@ func loadStore(mode storageMode) (store, storeLocation, error) {
 	}
 
 	return s, location, nil
-}
-
-func resolveStoreLocation(mode storageMode) (storeLocation, error) {
-	localPath, err := localDataPath()
-	if err != nil {
-		return storeLocation{}, err
-	}
-
-	switch mode {
-	case storageHere:
-		created, notice, err := ensureStoreFile(localPath)
-		if err != nil {
-			return storeLocation{}, err
-		}
-		return storeLocation{Path: localPath, Scope: storeScopeLocal, SourceText: "local .todos", Created: created, Notice: notice}, nil
-	case storageGlobal:
-		return storeLocation{Path: globalDataPath(), Scope: storeScopeGlobal, SourceText: "global store"}, nil
-	default:
-		if _, err := os.Stat(localPath); err == nil {
-			return storeLocation{Path: localPath, Scope: storeScopeLocal, SourceText: "local .todos"}, nil
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return storeLocation{}, fmt.Errorf("check local todos: %w", err)
-		}
-		return storeLocation{Path: globalDataPath(), Scope: storeScopeGlobal, SourceText: "global store"}, nil
-	}
-}
-
-func ensureStoreFile(path string) (bool, string, error) {
-	if _, err := os.Stat(path); err == nil {
-		return false, "", nil
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return false, "", fmt.Errorf("check todos file: %w", err)
-	}
-
-	if err := saveStore(path, store{}); err != nil {
-		return false, "", err
-	}
-
-	return true, localStoreNotice(path), nil
-}
-
-func localStoreNotice(path string) string {
-	gitRoot, ok := gitRoot(filepath.Dir(path))
-	if !ok {
-		return fmt.Sprintf("Created %s file.", path)
-	}
-
-	displayPath := gitignoreEntry(gitRoot, path)
-	if strings.HasPrefix(displayPath, "/") {
-		displayPath = strings.TrimPrefix(displayPath, "/")
-	}
-	ignoreEntry := gitignoreEntry(gitRoot, path)
-	return fmt.Sprintf("Created %s file.\nTo keep local todos out of git, add %q to .gitignore.", displayPath, ignoreEntry)
-}
-
-func gitRoot(startDir string) (string, bool) {
-	dir := filepath.Clean(startDir)
-	for {
-		gitDir := filepath.Join(dir, ".git")
-		if info, err := os.Stat(gitDir); err == nil {
-			_ = info
-			return dir, true
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return "", false
-		}
-
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			return "", false
-		}
-		dir = parent
-	}
-}
-
-func gitignoreEntry(root, path string) string {
-	rel, err := filepath.Rel(root, path)
-	if err != nil {
-		return filepath.Base(path)
-	}
-	rel = filepath.ToSlash(rel)
-	if rel == ".todos" {
-		return ".todos"
-	}
-	return "/" + rel
 }
 
 func saveStore(path string, s store) error {
@@ -722,24 +508,23 @@ func saveStore(path string, s store) error {
 }
 
 type keyMap struct {
-	Up         key.Binding
-	Down       key.Binding
-	Top        key.Binding
-	Bottom     key.Binding
-	SwitchView key.Binding
-	MoveUp     key.Binding
-	MoveDown   key.Binding
-	EditStart  key.Binding
-	EditEnd    key.Binding
-	OpenBelow  key.Binding
-	OpenAbove  key.Binding
-	Toggle     key.Binding
-	Delete     key.Binding
-	ClearDone  key.Binding
-	ToggleAll  key.Binding
-	Quit       key.Binding
-	Cancel     key.Binding
-	Help       key.Binding
+	Up        key.Binding
+	Down      key.Binding
+	Top       key.Binding
+	Bottom    key.Binding
+	MoveUp    key.Binding
+	MoveDown  key.Binding
+	EditStart key.Binding
+	EditEnd   key.Binding
+	OpenBelow key.Binding
+	OpenAbove key.Binding
+	Toggle    key.Binding
+	Delete    key.Binding
+	ClearDone key.Binding
+	ToggleAll key.Binding
+	Quit      key.Binding
+	Cancel    key.Binding
+	Help      key.Binding
 }
 
 func (k keyMap) ShortHelp() []key.Binding {
@@ -747,7 +532,7 @@ func (k keyMap) ShortHelp() []key.Binding {
 }
 
 func (k keyMap) FullHelp() [][]key.Binding {
-	return [][]key.Binding{{k.Up, k.Down, k.Top, k.Bottom}, {k.EditStart, k.EditEnd, k.OpenBelow, k.OpenAbove}, {k.Toggle, k.Delete, k.ClearDone, k.MoveUp}, {k.MoveDown, k.ToggleAll, k.SwitchView, k.Help}, {k.Cancel, k.Quit}}
+	return [][]key.Binding{{k.Up, k.Down, k.Top, k.Bottom}, {k.EditStart, k.EditEnd, k.OpenBelow, k.OpenAbove}, {k.Toggle, k.Delete, k.ClearDone, k.MoveUp}, {k.MoveDown, k.ToggleAll, k.Help}, {k.Cancel, k.Quit}}
 }
 
 var keys = keyMap{
@@ -766,10 +551,6 @@ var keys = keyMap{
 	Bottom: key.NewBinding(
 		key.WithKeys("G"),
 		key.WithHelp("G", "jump bottom"),
-	),
-	SwitchView: key.NewBinding(
-		key.WithKeys("tab"),
-		key.WithHelp("tab", "switch scope"),
 	),
 	MoveUp: key.NewBinding(
 		key.WithKeys("K", "shift+up"),
@@ -826,12 +607,11 @@ var keys = keyMap{
 }
 
 type model struct {
-	store                 store
-	location              storeLocation
-	cursor                int
-	showAll               bool
-	confirmCreateLocal    bool
-	directionalNewItem     int
+	store               store
+	location            storeLocation
+	cursor              int
+	showAll             bool
+	directionalNewItem  int
 	help                  help.Model
 	showHelp              bool
 	editMode              editMode
@@ -885,28 +665,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.animatingDoneIndex = -1
 		}
 	case tea.KeyMsg:
-		if m.confirmCreateLocal {
-			switch msg.Type {
-			case tea.KeyEnter:
-				m.confirmCreateLocal = false
-			case tea.KeyEsc:
-				m.confirmCreateLocal = false
-			default:
-				if msg.Type == tea.KeyRunes {
-					switch strings.ToLower(msg.String()) {
-					case "y":
-						if err := m.confirmLocalScopeSwitch(); err != nil {
-							m.err = err
-							return m, tea.Quit
-						}
-					case "n":
-						m.confirmCreateLocal = false
-					}
-				}
-			}
-			return m, nil
-		}
-
 		if m.isEditing() {
 			if m.isDirectionalNewItemEdit() {
 				switch msg.Type {
@@ -973,12 +731,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			visible := m.visibleIndexes()
 			if len(visible) > 0 {
 				m.cursor = len(visible) - 1
-			}
-		case key.Matches(msg, keys.SwitchView):
-			m.pendingG = false
-			if err := m.switchScope(); err != nil {
-				m.err = err
-				return m, tea.Quit
 			}
 		case key.Matches(msg, keys.EditStart):
 			m.pendingG = false
@@ -1069,14 +821,6 @@ func (m model) View() string {
 	b.WriteString(titleStyle.Render("Todo:"))
 	b.WriteString("\n")
 	b.WriteString(subtitleStyle.Render(m.statusLine()))
-	if m.location.Notice != "" {
-		b.WriteString("\n")
-		b.WriteString(mutedStyle.Render(renderLocationNotice(m.location.Notice)))
-	}
-	if m.confirmCreateLocal {
-		b.WriteString("\n")
-		b.WriteString(accentStyle.Render("Create .todos file? [y/N]"))
-	}
 	b.WriteString("\n\n")
 
 	if len(m.store.Items) == 0 {
@@ -1520,52 +1264,7 @@ func (m model) statusLine() string {
 		mode = "showing open"
 	}
 
-	return fmt.Sprintf("%d open, %d done • %s • %s", open, done, mode, m.location.SourceText)
-}
-
-func (m *model) switchScope() error {
-	if m.location.Scope == storeScopeLocal {
-		return m.switchToScope(storageGlobal)
-	}
-
-	localPath, err := localDataPath()
-	if err != nil {
-		return err
-	}
-	if _, err := os.Stat(localPath); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			m.confirmCreateLocal = true
-			return nil
-		}
-		return fmt.Errorf("check local todos: %w", err)
-	}
-
-	return m.switchToScope(storageHere)
-}
-
-func (m *model) confirmLocalScopeSwitch() error {
-	m.confirmCreateLocal = false
-	return m.switchToScope(storageHere)
-}
-
-func (m *model) switchToScope(mode storageMode) error {
-	s, location, err := loadStore(mode)
-	if err != nil {
-		return err
-	}
-
-	m.store = s
-	m.location = location
-	m.showAll = !s.HideDoneInTUI
-	m.confirmCreateLocal = false
-	m.cursor = 0
-	m.pendingG = false
-	m.animatingDoneIndex = -1
-	m.animatingDoneFrames = 0
-	m.animatingDoneCursor = 0
-	m.cancelEdit()
-	m.clampCursor()
-	return nil
+	return fmt.Sprintf("%d open, %d done • %s", open, done, mode)
 }
 
 var (

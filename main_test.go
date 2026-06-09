@@ -1,8 +1,7 @@
 package main
 
 import (
-	"bytes"
-	"errors"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,700 +11,11 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-func canonicalPath(t *testing.T, path string) string {
-	t.Helper()
-	resolved, err := filepath.EvalSymlinks(path)
-	if err == nil {
-		return resolved
-	}
-	return filepath.Clean(path)
-}
 
-func TestParseArgsHereList(t *testing.T) {
-	opts, err := parseArgs([]string{"-H", "-l"})
-	if err != nil {
-		t.Fatalf("parseArgs returned error: %v", err)
-	}
-	if opts.storage != storageHere {
-		t.Fatalf("expected storageHere, got %v", opts.storage)
-	}
-	if opts.action != actionList {
-		t.Fatalf("expected actionList, got %v", opts.action)
-	}
-}
-
-func TestParseArgsGlobalAdd(t *testing.T) {
-	opts, err := parseArgs([]string{"-g", "-t", "ship", "it"})
-	if err != nil {
-		t.Fatalf("parseArgs returned error: %v", err)
-	}
-	if opts.storage != storageGlobal {
-		t.Fatalf("expected storageGlobal, got %v", opts.storage)
-	}
-	if opts.action != actionAdd {
-		t.Fatalf("expected actionAdd, got %v", opts.action)
-	}
-	if opts.position != addTop {
-		t.Fatalf("expected addTop, got %v", opts.position)
-	}
-	if len(opts.addArgs) != 2 || opts.addArgs[0] != "ship" || opts.addArgs[1] != "it" {
-		t.Fatalf("unexpected add args: %#v", opts.addArgs)
-	}
-}
-
-func TestParseArgsRejectsHereAndGlobal(t *testing.T) {
-	if _, err := parseArgs([]string{"-H", "-g"}); err == nil {
-		t.Fatal("expected parseArgs to reject -H with -g")
-	}
-}
-
-func TestResolveStoreLocationPrefersLocal(t *testing.T) {
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	tempDir := t.TempDir()
-	if err := os.Chdir(tempDir); err != nil {
-		t.Fatalf("chdir temp dir: %v", err)
-	}
-	defer func() {
-		_ = os.Chdir(wd)
-	}()
-
-	localPath := filepath.Join(tempDir, ".todos")
-	if err := saveStore(localPath, store{}); err != nil {
-		t.Fatalf("save local store: %v", err)
-	}
-
-	location, err := resolveStoreLocation(storageAuto)
-	if err != nil {
-		t.Fatalf("resolveStoreLocation: %v", err)
-	}
-	if location.Scope != storeScopeLocal {
-		t.Fatalf("expected local scope, got %v", location.Scope)
-	}
-	if canonicalPath(t, location.Path) != canonicalPath(t, localPath) {
-		t.Fatalf("expected local path %q, got %q", localPath, location.Path)
-	}
-}
-
-func TestResolveStoreLocationGlobalOverride(t *testing.T) {
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	tempDir := t.TempDir()
-	if err := os.Chdir(tempDir); err != nil {
-		t.Fatalf("chdir temp dir: %v", err)
-	}
-	defer func() {
-		_ = os.Chdir(wd)
-	}()
-
-	localPath := filepath.Join(tempDir, ".todos")
-	if err := saveStore(localPath, store{}); err != nil {
-		t.Fatalf("save local store: %v", err)
-	}
-
-	location, err := resolveStoreLocation(storageGlobal)
-	if err != nil {
-		t.Fatalf("resolveStoreLocation: %v", err)
-	}
-	if location.Scope != storeScopeGlobal {
-		t.Fatalf("expected global scope, got %v", location.Scope)
-	}
-	if canonicalPath(t, location.Path) == canonicalPath(t, localPath) {
-		t.Fatalf("expected global path, got local path %q", location.Path)
-	}
-}
-
-func TestResolveStoreLocationHereCreatesFile(t *testing.T) {
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	tempDir := t.TempDir()
-	if err := os.Chdir(tempDir); err != nil {
-		t.Fatalf("chdir temp dir: %v", err)
-	}
-	defer func() {
-		_ = os.Chdir(wd)
-	}()
-
-	localPath := filepath.Join(tempDir, ".todos")
-	if err := saveStore(localPath, store{}); err != nil {
-		t.Fatalf("save local store: %v", err)
-	}
-	location, err := resolveStoreLocation(storageHere)
-	if err != nil {
-		t.Fatalf("resolveStoreLocation: %v", err)
-	}
-	if location.Created {
-		t.Fatal("expected existing local store not to be marked as created")
-	}
-	if canonicalPath(t, location.Path) != canonicalPath(t, localPath) {
-		t.Fatalf("expected local path %q, got %q", localPath, location.Path)
-	}
-	if _, err := os.Stat(localPath); err != nil {
-		t.Fatalf("expected local file to exist: %v", err)
-	}
-	if location.Notice != "" {
-		t.Fatalf("expected no creation notice for existing store, got %q", location.Notice)
-	}
-
-	s, loadedLocation, err := loadStore(storageHere)
-	if err != nil {
-		t.Fatalf("loadStore: %v", err)
-	}
-	if len(s.Items) != 0 {
-		t.Fatalf("expected empty local store, got %d items", len(s.Items))
-	}
-	if loadedLocation.Scope != storeScopeLocal {
-		t.Fatalf("expected local scope, got %v", loadedLocation.Scope)
-	}
-}
-
-func TestConfirmLocalStoreCreationIfNeededAcceptsCreation(t *testing.T) {
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	tempDir := t.TempDir()
-	if err := os.Chdir(tempDir); err != nil {
-		t.Fatalf("chdir temp dir: %v", err)
-	}
-	defer func() {
-		_ = os.Chdir(wd)
-	}()
-
-	var out bytes.Buffer
-	if err := confirmLocalStoreCreationIfNeeded(storageHere, strings.NewReader("y\n"), &out); err != nil {
-		t.Fatalf("confirmLocalStoreCreationIfNeeded: %v", err)
-	}
-	if !strings.Contains(out.String(), "Create .todos file? [y/N]:") {
-		t.Fatalf("expected confirmation prompt, got %q", out.String())
-	}
-	location, err := resolveStoreLocation(storageHere)
-	if err != nil {
-		t.Fatalf("resolveStoreLocation: %v", err)
-	}
-	if !location.Created {
-		t.Fatal("expected newly created local store")
-	}
-	if _, err := os.Stat(filepath.Join(tempDir, ".todos")); err != nil {
-		t.Fatalf("expected local file to be created: %v", err)
-	}
-}
-
-func TestConfirmLocalStoreCreationIfNeededDeclinesCreation(t *testing.T) {
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	tempDir := t.TempDir()
-	if err := os.Chdir(tempDir); err != nil {
-		t.Fatalf("chdir temp dir: %v", err)
-	}
-	defer func() {
-		_ = os.Chdir(wd)
-	}()
-
-	var out bytes.Buffer
-	err = confirmLocalStoreCreationIfNeeded(storageHere, strings.NewReader("n\n"), &out)
-	if err == nil {
-		t.Fatal("expected declined local store creation to return error")
-	}
-	if !strings.Contains(err.Error(), "canceled") {
-		t.Fatalf("expected cancel error, got %v", err)
-	}
-	if _, statErr := os.Stat(filepath.Join(tempDir, ".todos")); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("expected local file not to be created, got %v", statErr)
-	}
-}
-
-func TestResolveStoreLocationHereGitIgnoreNotice(t *testing.T) {
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	tempDir := t.TempDir()
-	projectDir := filepath.Join(tempDir, "project")
-	if err := os.MkdirAll(filepath.Join(projectDir, ".git"), 0o755); err != nil {
-		t.Fatalf("mkdir git dir: %v", err)
-	}
-	if err := os.Chdir(projectDir); err != nil {
-		t.Fatalf("chdir project dir: %v", err)
-	}
-	defer func() {
-		_ = os.Chdir(wd)
-	}()
-
-	location, err := resolveStoreLocation(storageHere)
-	if err != nil {
-		t.Fatalf("resolveStoreLocation: %v", err)
-	}
-	if !strings.Contains(location.Notice, ".gitignore") {
-		t.Fatalf("expected gitignore notice, got %q", location.Notice)
-	}
-	if strings.Contains(location.Notice, projectDir) {
-		t.Fatalf("expected relative gitignore path in notice, got %q", location.Notice)
-	}
-	if !strings.Contains(location.Notice, "\nTo keep local todos out of git") {
-		t.Fatalf("expected second-line gitignore guidance, got %q", location.Notice)
-	}
-	if !strings.Contains(location.Notice, ".todos") {
-		t.Fatalf("expected .todos ignore hint, got %q", location.Notice)
-	}
-}
-
-func TestRenderLocationNoticePreservesNoticeText(t *testing.T) {
-	notice := "Created .todos file.\nTo keep local todos out of git, add \".todos\" to .gitignore."
-	rendered := renderLocationNotice(notice)
-
-	if !strings.Contains(rendered, "Created .todos file.") {
-		t.Fatalf("expected creation line to remain readable, got %q", rendered)
-	}
-	if rendered != notice {
-		t.Fatalf("expected notice rendering to stay plain, got %q", rendered)
-	}
-	if !strings.Contains(rendered, ".gitignore") {
-		t.Fatalf("expected git help text to remain present, got %q", rendered)
-	}
-}
-
-func TestTitleSourceTextUsesSimpleScopeLabels(t *testing.T) {
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	tempDir := t.TempDir()
-	if err := os.Chdir(tempDir); err != nil {
-		t.Fatalf("chdir temp dir: %v", err)
-	}
-	defer func() {
-		_ = os.Chdir(wd)
-	}()
-
-	if got := titleSourceText(storeLocation{Scope: storeScopeLocal, SourceText: "local .todos"}); got != "local" {
-		t.Fatalf("expected local title label, got %q", got)
-	}
-	if got := titleSourceText(storeLocation{Scope: storeScopeGlobal, SourceText: "global store"}); got != "" {
-		t.Fatalf("expected no global title label without local file, got %q", got)
-	}
-	if err := saveStore(filepath.Join(tempDir, ".todos"), store{}); err != nil {
-		t.Fatalf("save local store: %v", err)
-	}
-	if got := titleSourceText(storeLocation{Scope: storeScopeGlobal, SourceText: "global store"}); got != "global" {
-		t.Fatalf("expected global title label, got %q", got)
-	}
-}
-
-func TestTodoTitleOmitsGlobalWhenNoLocalStoreExists(t *testing.T) {
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	tempDir := t.TempDir()
-	if err := os.Chdir(tempDir); err != nil {
-		t.Fatalf("chdir temp dir: %v", err)
-	}
-	defer func() {
-		_ = os.Chdir(wd)
-	}()
-
-	if got := todoTitle(storeLocation{Scope: storeScopeGlobal, SourceText: "global store"}); got != "Todo:" {
-		t.Fatalf("expected plain global title without local store, got %q", got)
-	}
-}
-
-func TestSwitchScopeFromLocalToGlobal(t *testing.T) {
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	tempDir := t.TempDir()
-	if err := os.Chdir(tempDir); err != nil {
-		t.Fatalf("chdir temp dir: %v", err)
-	}
-	defer func() {
-		_ = os.Chdir(wd)
-	}()
-
-	localPath := filepath.Join(tempDir, ".todos")
-	localStore := store{Items: []todo{{Description: "local item"}}, HideDoneInTUI: true}
-	if err := saveStore(localPath, localStore); err != nil {
-		t.Fatalf("save local store: %v", err)
-	}
-
-	globalPath := globalDataPath()
-	globalStore := store{Items: []todo{{Description: "global item"}}}
-	if err := saveStore(globalPath, globalStore); err != nil {
-		t.Fatalf("save global store: %v", err)
-	}
-
-	m := newModel(localStore, storeLocation{Path: localPath, Scope: storeScopeLocal, SourceText: "local .todos"})
-	m.cursor = 3
-	m.pendingG = true
-	m.editMode = editModeCurrent
-	m.editIndex = 0
-	m.input = "editing"
-	m.inputCursor = len([]rune(m.input))
-
-	if err := m.switchScope(); err != nil {
-		t.Fatalf("switchScope: %v", err)
-	}
-	if m.location.Scope != storeScopeGlobal {
-		t.Fatalf("expected global scope, got %v", m.location.Scope)
-	}
-	if len(m.store.Items) != 1 || m.store.Items[0].Description != "global item" {
-		t.Fatalf("expected global store items, got %#v", m.store.Items)
-	}
-	if !m.showAll {
-		t.Fatal("expected showAll to reflect global store settings")
-	}
-	if m.cursor != 0 {
-		t.Fatalf("expected cursor reset to 0, got %d", m.cursor)
-	}
-	if m.isEditing() {
-		t.Fatal("expected edit mode to be cleared on scope switch")
-	}
-	if m.pendingG {
-		t.Fatal("expected pending g state to be cleared on scope switch")
-	}
-	if canonicalPath(t, m.location.Path) != canonicalPath(t, globalPath) {
-		t.Fatalf("expected global path %q, got %q", globalPath, m.location.Path)
-	}
-	if m.location.SourceText != "global store" {
-		t.Fatalf("expected global source text, got %q", m.location.SourceText)
-	}
-	if m.location.Notice != "" {
-		t.Fatalf("expected no global notice, got %q", m.location.Notice)
-	}
-	if m.animatingDoneIndex != -1 || m.animatingDoneFrames != 0 || m.animatingDoneCursor != 0 {
-		t.Fatalf("expected animation state reset, got index=%d frames=%d cursor=%d", m.animatingDoneIndex, m.animatingDoneFrames, m.animatingDoneCursor)
-	}
-	_ = os.Remove(globalPath)
-}
-
-func TestSwitchScopeFromGlobalToLocalUsesExistingLocalStore(t *testing.T) {
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	tempDir := t.TempDir()
-	projectDir := filepath.Join(tempDir, "project")
-	if err := os.MkdirAll(filepath.Join(projectDir, ".git"), 0o755); err != nil {
-		t.Fatalf("mkdir git dir: %v", err)
-	}
-	if err := os.Chdir(projectDir); err != nil {
-		t.Fatalf("chdir project dir: %v", err)
-	}
-	defer func() {
-		_ = os.Chdir(wd)
-	}()
-
-	globalPath := globalDataPath()
-	globalStore := store{Items: []todo{{Description: "global item"}}}
-	if err := saveStore(globalPath, globalStore); err != nil {
-		t.Fatalf("save global store: %v", err)
-	}
-	localPath := filepath.Join(projectDir, ".todos")
-	localStore := store{Items: []todo{{Description: "local item"}}, HideDoneInTUI: true}
-	if err := saveStore(localPath, localStore); err != nil {
-		t.Fatalf("save local store: %v", err)
-	}
-
-	m := newModel(globalStore, storeLocation{Path: globalPath, Scope: storeScopeGlobal, SourceText: "global store"})
-	if err := m.switchScope(); err != nil {
-		t.Fatalf("switchScope: %v", err)
-	}
-
-	if m.location.Scope != storeScopeLocal {
-		t.Fatalf("expected local scope, got %v", m.location.Scope)
-	}
-	if canonicalPath(t, m.location.Path) != canonicalPath(t, localPath) {
-		t.Fatalf("expected local path %q, got %q", localPath, m.location.Path)
-	}
-	if len(m.store.Items) != 1 || m.store.Items[0].Description != "local item" {
-		t.Fatalf("expected local store items, got %#v", m.store.Items)
-	}
-	if m.showAll {
-		t.Fatal("expected showAll to reflect local store settings")
-	}
-	if m.location.Created {
-		t.Fatal("expected existing local store not to be marked created")
-	}
-	if m.location.Notice != "" {
-		t.Fatalf("expected no creation notice for existing local store, got %q", m.location.Notice)
-	}
-	if _, err := os.Stat(localPath); err != nil {
-		t.Fatalf("expected local store to exist: %v", err)
-	}
-	_ = os.Remove(globalPath)
-}
-
-func TestSwitchScopeFromGlobalPromptsBeforeCreatingLocalStore(t *testing.T) {
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	tempDir := t.TempDir()
-	projectDir := filepath.Join(tempDir, "project")
-	if err := os.MkdirAll(filepath.Join(projectDir, ".git"), 0o755); err != nil {
-		t.Fatalf("mkdir git dir: %v", err)
-	}
-	if err := os.Chdir(projectDir); err != nil {
-		t.Fatalf("chdir project dir: %v", err)
-	}
-	defer func() {
-		_ = os.Chdir(wd)
-	}()
-
-	globalPath := globalDataPath()
-	globalStore := store{Items: []todo{{Description: "global item"}}}
-	if err := saveStore(globalPath, globalStore); err != nil {
-		t.Fatalf("save global store: %v", err)
-	}
-
-	m := newModel(globalStore, storeLocation{Path: globalPath, Scope: storeScopeGlobal, SourceText: "global store"})
-	if err := m.switchScope(); err != nil {
-		t.Fatalf("switchScope: %v", err)
-	}
-
-	localPath := filepath.Join(projectDir, ".todos")
-	if !m.confirmCreateLocal {
-		t.Fatal("expected confirm-create-local prompt")
-	}
-	if m.location.Scope != storeScopeGlobal {
-		t.Fatalf("expected to stay in global scope, got %v", m.location.Scope)
-	}
-	if _, err := os.Stat(localPath); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("expected local store not to exist yet, got %v", err)
-	}
-	view := m.View()
-	if !strings.Contains(view, "Create .todos file? [y/N]") {
-		t.Fatalf("expected confirmation prompt in view, got %q", view)
-	}
-	_ = os.Remove(globalPath)
-}
-
-func TestConfirmLocalScopeSwitchWithEnterCancels(t *testing.T) {
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	tempDir := t.TempDir()
-	projectDir := filepath.Join(tempDir, "project")
-	if err := os.MkdirAll(filepath.Join(projectDir, ".git"), 0o755); err != nil {
-		t.Fatalf("mkdir git dir: %v", err)
-	}
-	if err := os.Chdir(projectDir); err != nil {
-		t.Fatalf("chdir project dir: %v", err)
-	}
-	defer func() {
-		_ = os.Chdir(wd)
-	}()
-
-	globalPath := globalDataPath()
-	globalStore := store{Items: []todo{{Description: "global item"}}}
-	if err := saveStore(globalPath, globalStore); err != nil {
-		t.Fatalf("save global store: %v", err)
-	}
-
-	m := newModel(globalStore, storeLocation{Path: globalPath, Scope: storeScopeGlobal, SourceText: "global store"})
-	if err := m.switchScope(); err != nil {
-		t.Fatalf("switchScope: %v", err)
-	}
-
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	if cmd != nil {
-		t.Fatal("expected no command when canceling local store creation")
-	}
-	next, ok := updated.(model)
-	if !ok {
-		t.Fatalf("expected model result, got %T", updated)
-	}
-	localPath := filepath.Join(projectDir, ".todos")
-	if next.confirmCreateLocal {
-		t.Fatal("expected confirm prompt to close after enter")
-	}
-	if next.location.Scope != storeScopeGlobal {
-		t.Fatalf("expected to stay in global scope, got %v", next.location.Scope)
-	}
-	if _, err := os.Stat(localPath); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("expected local store not to exist after enter cancel, got %v", err)
-	}
-	_ = os.Remove(globalPath)
-}
-
-func TestCancelLocalScopeSwitchWithEscStaysGlobal(t *testing.T) {
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	tempDir := t.TempDir()
-	projectDir := filepath.Join(tempDir, "project")
-	if err := os.MkdirAll(filepath.Join(projectDir, ".git"), 0o755); err != nil {
-		t.Fatalf("mkdir git dir: %v", err)
-	}
-	if err := os.Chdir(projectDir); err != nil {
-		t.Fatalf("chdir project dir: %v", err)
-	}
-	defer func() {
-		_ = os.Chdir(wd)
-	}()
-
-	globalPath := globalDataPath()
-	globalStore := store{Items: []todo{{Description: "global item"}}}
-	if err := saveStore(globalPath, globalStore); err != nil {
-		t.Fatalf("save global store: %v", err)
-	}
-
-	m := newModel(globalStore, storeLocation{Path: globalPath, Scope: storeScopeGlobal, SourceText: "global store"})
-	if err := m.switchScope(); err != nil {
-		t.Fatalf("switchScope: %v", err)
-	}
-
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
-	if cmd != nil {
-		t.Fatal("expected no command when cancelling local store creation")
-	}
-	next, ok := updated.(model)
-	if !ok {
-		t.Fatalf("expected model result, got %T", updated)
-	}
-	localPath := filepath.Join(projectDir, ".todos")
-	if next.confirmCreateLocal {
-		t.Fatal("expected confirm prompt to close after cancel")
-	}
-	if next.location.Scope != storeScopeGlobal {
-		t.Fatalf("expected to stay in global scope, got %v", next.location.Scope)
-	}
-	if _, err := os.Stat(localPath); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("expected local store not to exist after cancel, got %v", err)
-	}
-	_ = os.Remove(globalPath)
-}
-
-func TestConfirmLocalScopeSwitchWithYCreatesLocalStore(t *testing.T) {
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	tempDir := t.TempDir()
-	projectDir := filepath.Join(tempDir, "project")
-	if err := os.MkdirAll(filepath.Join(projectDir, ".git"), 0o755); err != nil {
-		t.Fatalf("mkdir git dir: %v", err)
-	}
-	if err := os.Chdir(projectDir); err != nil {
-		t.Fatalf("chdir project dir: %v", err)
-	}
-	defer func() {
-		_ = os.Chdir(wd)
-	}()
-
-	globalPath := globalDataPath()
-	globalStore := store{Items: []todo{{Description: "global item"}}}
-	if err := saveStore(globalPath, globalStore); err != nil {
-		t.Fatalf("save global store: %v", err)
-	}
-
-	m := newModel(globalStore, storeLocation{Path: globalPath, Scope: storeScopeGlobal, SourceText: "global store"})
-	if err := m.switchScope(); err != nil {
-		t.Fatalf("switchScope: %v", err)
-	}
-
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
-	if cmd != nil {
-		t.Fatal("expected no command when confirming with y")
-	}
-	next, ok := updated.(model)
-	if !ok {
-		t.Fatalf("expected model result, got %T", updated)
-	}
-	localPath := filepath.Join(projectDir, ".todos")
-	if next.location.Scope != storeScopeLocal {
-		t.Fatalf("expected local scope, got %v", next.location.Scope)
-	}
-	if _, err := os.Stat(localPath); err != nil {
-		t.Fatalf("expected local store to exist: %v", err)
-	}
-	_ = os.Remove(globalPath)
-}
-
-func TestCancelLocalScopeSwitchWithNStaysGlobal(t *testing.T) {
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	tempDir := t.TempDir()
-	projectDir := filepath.Join(tempDir, "project")
-	if err := os.MkdirAll(filepath.Join(projectDir, ".git"), 0o755); err != nil {
-		t.Fatalf("mkdir git dir: %v", err)
-	}
-	if err := os.Chdir(projectDir); err != nil {
-		t.Fatalf("chdir project dir: %v", err)
-	}
-	defer func() {
-		_ = os.Chdir(wd)
-	}()
-
-	globalPath := globalDataPath()
-	globalStore := store{Items: []todo{{Description: "global item"}}}
-	if err := saveStore(globalPath, globalStore); err != nil {
-		t.Fatalf("save global store: %v", err)
-	}
-
-	m := newModel(globalStore, storeLocation{Path: globalPath, Scope: storeScopeGlobal, SourceText: "global store"})
-	if err := m.switchScope(); err != nil {
-		t.Fatalf("switchScope: %v", err)
-	}
-
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
-	if cmd != nil {
-		t.Fatal("expected no command when cancelling with n")
-	}
-	next, ok := updated.(model)
-	if !ok {
-		t.Fatalf("expected model result, got %T", updated)
-	}
-	localPath := filepath.Join(projectDir, ".todos")
-	if next.location.Scope != storeScopeGlobal {
-		t.Fatalf("expected to stay in global scope, got %v", next.location.Scope)
-	}
-	if _, err := os.Stat(localPath); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("expected local store not to exist after n cancel, got %v", err)
-	}
-	_ = os.Remove(globalPath)
-}
-
-func TestTabKeyBindingShowsSwitchScope(t *testing.T) {
-	help := keys.SwitchView.Help()
-	if help.Key != "tab" {
-		t.Fatalf("expected tab key help, got %q", help.Key)
-	}
-	if help.Desc != "switch scope" {
-		t.Fatalf("expected switch scope help text, got %q", help.Desc)
-	}
-	short := keys.ShortHelp()
-	if len(short) != 3 {
-		t.Fatalf("expected 3 short help bindings, got %d", len(short))
-	}
-	got := []string{short[0].Help().Key, short[1].Help().Key, short[2].Help().Key}
-	want := []string{"x/enter", "?", "q"}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("expected short help %v, got %v", want, got)
-		}
-	}
-	if short[0].Help().Desc != "toggle done" || short[1].Help().Desc != "toggle help" || short[2].Help().Desc != "quit" {
-		t.Fatalf("unexpected short help descriptions: %q, %q, %q", short[0].Help().Desc, short[1].Help().Desc, short[2].Help().Desc)
-	}
-}
 
 func TestEnterStartsAddingFirstItemWhenEmpty(t *testing.T) {
 	tempDir := t.TempDir()
-	location := storeLocation{Path: filepath.Join(tempDir, ".todos"), Scope: storeScopeLocal, SourceText: "local .todos"}
+	location := storeLocation{Path: filepath.Join(tempDir, ".todos")}
 	m := newModel(store{}, location)
 
 	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
@@ -736,7 +46,7 @@ func TestEnterStartsAddingFirstItemWhenEmpty(t *testing.T) {
 
 func TestEmptyViewPromptsEnterToAdd(t *testing.T) {
 	tempDir := t.TempDir()
-	location := storeLocation{Path: filepath.Join(tempDir, ".todos"), Scope: storeScopeLocal, SourceText: "local .todos"}
+	location := storeLocation{Path: filepath.Join(tempDir, ".todos")}
 	m := newModel(store{}, location)
 	view := m.View()
 
@@ -750,7 +60,7 @@ func TestEmptyViewPromptsEnterToAdd(t *testing.T) {
 
 func TestUppercaseEditShortcutsMatchLowercase(t *testing.T) {
 	tempDir := t.TempDir()
-	location := storeLocation{Path: filepath.Join(tempDir, ".todos"), Scope: storeScopeLocal, SourceText: "local .todos"}
+	location := storeLocation{Path: filepath.Join(tempDir, ".todos")}
 	base := newModel(store{Items: []todo{{Description: "write tests"}}}, location)
 
 	updatedStart, _ := base.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'I'}})
@@ -786,7 +96,7 @@ func TestUppercaseEditShortcutsMatchLowercase(t *testing.T) {
 
 func TestUpAtFirstItemStartsAddingAbove(t *testing.T) {
 	tempDir := t.TempDir()
-	location := storeLocation{Path: filepath.Join(tempDir, ".todos"), Scope: storeScopeLocal, SourceText: "local .todos"}
+	location := storeLocation{Path: filepath.Join(tempDir, ".todos")}
 	m := newModel(store{Items: []todo{{Description: "first"}, {Description: "second"}}}, location)
 
 	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
@@ -810,7 +120,7 @@ func TestUpAtFirstItemStartsAddingAbove(t *testing.T) {
 
 func TestDownAtLastItemStartsAddingBelow(t *testing.T) {
 	tempDir := t.TempDir()
-	location := storeLocation{Path: filepath.Join(tempDir, ".todos"), Scope: storeScopeLocal, SourceText: "local .todos"}
+	location := storeLocation{Path: filepath.Join(tempDir, ".todos")}
 	m := newModel(store{Items: []todo{{Description: "first"}, {Description: "second"}}}, location)
 	m.cursor = 1
 
@@ -845,7 +155,7 @@ func TestDirectionalAddDownSavesAndContinuesOnDown(t *testing.T) {
 	defer func() {
 		_ = os.Chdir(wd)
 	}()
-	location := storeLocation{Path: filepath.Join(tempDir, ".todos"), Scope: storeScopeLocal, SourceText: "local .todos"}
+	location := storeLocation{Path: filepath.Join(tempDir, ".todos")}
 	m := newModel(store{Items: []todo{{Description: "first"}, {Description: "second"}}}, location)
 	m.cursor = 1
 
@@ -880,9 +190,15 @@ func TestDirectionalAddDownSavesAndContinuesOnDown(t *testing.T) {
 	if chained.directionalNewItem != 1 {
 		t.Fatalf("expected downward directional add marker, got %d", chained.directionalNewItem)
 	}
-	if saved, _, err := loadStore(storageHere); err != nil {
+	data, err := os.ReadFile(location.Path)
+	if err != nil {
 		t.Fatalf("load saved store: %v", err)
-	} else if len(saved.Items) != 3 || saved.Items[2].Description != "third" {
+	}
+	var saved store
+	if err := json.Unmarshal(data, &saved); err != nil {
+		t.Fatalf("decode saved store: %v", err)
+	}
+	if len(saved.Items) != 3 || saved.Items[2].Description != "third" {
 		t.Fatalf("expected saved chained item in store file, got %#v", saved.Items)
 	}
 }
@@ -899,7 +215,7 @@ func TestDirectionalAddDownCancelsOnUp(t *testing.T) {
 	defer func() {
 		_ = os.Chdir(wd)
 	}()
-	location := storeLocation{Path: filepath.Join(tempDir, ".todos"), Scope: storeScopeLocal, SourceText: "local .todos"}
+	location := storeLocation{Path: filepath.Join(tempDir, ".todos")}
 	m := newModel(store{Items: []todo{{Description: "first"}, {Description: "second"}}}, location)
 	m.cursor = 1
 
@@ -925,16 +241,14 @@ func TestDirectionalAddDownCancelsOnUp(t *testing.T) {
 	if cancelled.directionalNewItem != 0 {
 		t.Fatalf("expected directional marker reset, got %d", cancelled.directionalNewItem)
 	}
-	if saved, _, err := loadStore(storageHere); err != nil {
-		t.Fatalf("load saved store: %v", err)
-	} else if len(saved.Items) != 0 {
-		t.Fatalf("expected no persisted item after cancel, got %#v", saved.Items)
+	if _, err := os.Stat(location.Path); err == nil {
+		t.Fatal("expected no store file to be created after cancel")
 	}
 }
 
 func TestHideDoneKeepsCursorOnSameOpenTask(t *testing.T) {
 	tempDir := t.TempDir()
-	location := storeLocation{Path: filepath.Join(tempDir, ".todos"), Scope: storeScopeLocal, SourceText: "local .todos"}
+	location := storeLocation{Path: filepath.Join(tempDir, ".todos")}
 	m := newModel(store{Items: []todo{
 		{Description: "open first"},
 		{Description: "done", Done: true, DoneAt: time.Now()},
@@ -975,7 +289,7 @@ func TestDirectionalAddUpSavesAndContinuesOnUp(t *testing.T) {
 	defer func() {
 		_ = os.Chdir(wd)
 	}()
-	location := storeLocation{Path: filepath.Join(tempDir, ".todos"), Scope: storeScopeLocal, SourceText: "local .todos"}
+	location := storeLocation{Path: filepath.Join(tempDir, ".todos")}
 	m := newModel(store{Items: []todo{{Description: "first"}, {Description: "second"}}}, location)
 
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
@@ -1020,7 +334,7 @@ func TestDirectionalAddUpCancelsOnDown(t *testing.T) {
 	defer func() {
 		_ = os.Chdir(wd)
 	}()
-	location := storeLocation{Path: filepath.Join(tempDir, ".todos"), Scope: storeScopeLocal, SourceText: "local .todos"}
+	location := storeLocation{Path: filepath.Join(tempDir, ".todos")}
 	m := newModel(store{Items: []todo{{Description: "first"}, {Description: "second"}}}, location)
 
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
@@ -1049,7 +363,7 @@ func TestDirectionalAddUpCancelsOnDown(t *testing.T) {
 
 func TestDirectionalAddTypingJAndKDoesNotTriggerBindings(t *testing.T) {
 	tempDir := t.TempDir()
-	location := storeLocation{Path: filepath.Join(tempDir, ".todos"), Scope: storeScopeLocal, SourceText: "local .todos"}
+	location := storeLocation{Path: filepath.Join(tempDir, ".todos")}
 	m := newModel(store{Items: []todo{{Description: "first"}, {Description: "second"}}}, location)
 	m.cursor = 1
 
@@ -1099,7 +413,7 @@ func TestDirectionalAddArrowKeysStillChain(t *testing.T) {
 	defer func() {
 		_ = os.Chdir(wd)
 	}()
-	location := storeLocation{Path: filepath.Join(tempDir, ".todos"), Scope: storeScopeLocal, SourceText: "local .todos"}
+	location := storeLocation{Path: filepath.Join(tempDir, ".todos")}
 	m := newModel(store{Items: []todo{{Description: "first"}, {Description: "second"}}}, location)
 	m.cursor = 1
 
@@ -1150,22 +464,6 @@ func TestParseArgsDeleteLongFlag(t *testing.T) {
 	}
 }
 
-func TestParseArgsDeleteWithStorage(t *testing.T) {
-	opts, err := parseArgs([]string{"-g", "-d", "2"})
-	if err != nil {
-		t.Fatalf("parseArgs returned error: %v", err)
-	}
-	if opts.action != actionDelete {
-		t.Fatalf("expected actionDelete, got %v", opts.action)
-	}
-	if opts.storage != storageGlobal {
-		t.Fatalf("expected storageGlobal, got %v", opts.storage)
-	}
-	if opts.deleteIndex != 2 {
-		t.Fatalf("expected deleteIndex 2, got %d", opts.deleteIndex)
-	}
-}
-
 func TestParseArgsDeleteRejectsMissingIndex(t *testing.T) {
 	if _, err := parseArgs([]string{"-d"}); err == nil {
 		t.Fatal("expected error for missing delete index")
@@ -1199,16 +497,32 @@ func TestParseArgsDeleteRejectsCombinations(t *testing.T) {
 	}
 }
 
-func TestRunDeleteRemovesOpenItem(t *testing.T) {
-	wd, err := os.Getwd()
+func TestParseArgsGreedyPositional(t *testing.T) {
+	opts, err := parseArgs([]string{"buy", "milk", "-p"})
 	if err != nil {
-		t.Fatalf("getwd: %v", err)
+		t.Fatalf("unexpected error: %v", err)
 	}
+	if got := strings.Join(opts.addArgs, " "); got != "buy milk -p" {
+		t.Fatalf("expected addArgs %q, got %q", "buy milk -p", got)
+	}
+
+	opts, err = parseArgs([]string{"-p", "-t", "buy", "milk", "--unknown"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := strings.Join(opts.addArgs, " "); got != "buy milk --unknown" {
+		t.Fatalf("expected addArgs %q, got %q", "buy milk --unknown", got)
+	}
+	if !opts.plain {
+		t.Fatal("expected plain flag set")
+	}
+	if opts.position != addTop {
+		t.Fatal("expected top position")
+	}
+}
+
+func TestRunDeleteRemovesOpenItem(t *testing.T) {
 	tempDir := t.TempDir()
-	if err := os.Chdir(tempDir); err != nil {
-		t.Fatalf("chdir temp dir: %v", err)
-	}
-	defer func() { _ = os.Chdir(wd) }()
 
 	storePath := filepath.Join(tempDir, ".todos")
 	s := store{Items: []todo{
@@ -1219,15 +533,19 @@ func TestRunDeleteRemovesOpenItem(t *testing.T) {
 	if err := saveStore(storePath, s); err != nil {
 		t.Fatalf("save store: %v", err)
 	}
-	location := storeLocation{Path: storePath, Scope: storeScopeLocal, SourceText: "local .todos"}
+	location := storeLocation{Path: storePath}
 
 	if err := runDelete(2, false, s, location); err != nil {
 		t.Fatalf("runDelete: %v", err)
 	}
 
-	saved, _, err := loadStore(storageHere)
+	data, err := os.ReadFile(storePath)
 	if err != nil {
 		t.Fatalf("load store: %v", err)
+	}
+	var saved store
+	if err := json.Unmarshal(data, &saved); err != nil {
+		t.Fatalf("decode store: %v", err)
 	}
 	if len(saved.Items) != 2 {
 		t.Fatalf("expected 2 items after delete, got %d", len(saved.Items))
@@ -1238,15 +556,7 @@ func TestRunDeleteRemovesOpenItem(t *testing.T) {
 }
 
 func TestRunDeleteSkipsDoneItems(t *testing.T) {
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
 	tempDir := t.TempDir()
-	if err := os.Chdir(tempDir); err != nil {
-		t.Fatalf("chdir temp dir: %v", err)
-	}
-	defer func() { _ = os.Chdir(wd) }()
 
 	storePath := filepath.Join(tempDir, ".todos")
 	s := store{Items: []todo{
@@ -1257,15 +567,19 @@ func TestRunDeleteSkipsDoneItems(t *testing.T) {
 	if err := saveStore(storePath, s); err != nil {
 		t.Fatalf("save store: %v", err)
 	}
-	location := storeLocation{Path: storePath, Scope: storeScopeLocal, SourceText: "local .todos"}
+	location := storeLocation{Path: storePath}
 
 	if err := runDelete(2, false, s, location); err != nil {
 		t.Fatalf("runDelete: %v", err)
 	}
 
-	saved, _, err := loadStore(storageHere)
+	data, err := os.ReadFile(storePath)
 	if err != nil {
 		t.Fatalf("load store: %v", err)
+	}
+	var saved store
+	if err := json.Unmarshal(data, &saved); err != nil {
+		t.Fatalf("decode store: %v", err)
 	}
 	if len(saved.Items) != 2 {
 		t.Fatalf("expected 2 items after delete, got %d", len(saved.Items))
@@ -1282,7 +596,7 @@ func TestRunDeleteRejectsOutOfRange(t *testing.T) {
 	if err := saveStore(storePath, s); err != nil {
 		t.Fatalf("save store: %v", err)
 	}
-	location := storeLocation{Path: storePath, Scope: storeScopeLocal, SourceText: "local .todos"}
+	location := storeLocation{Path: storePath}
 
 	if err := runDelete(2, false, s, location); err == nil {
 		t.Fatal("expected error for out-of-range delete index")
