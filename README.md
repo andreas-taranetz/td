@@ -43,11 +43,8 @@ Then reload your shell.
 ```bash
 td --help
 td
-td "vibe features"
-td -t "fix bugs"
-td -H
-td -H -l
-td -g -l
+td add vibe features
+td -t fix bugs
 td -l
 td -la
 td -d 2
@@ -56,9 +53,9 @@ td -p -l
 
 - `td` opens interactive mode
 - `td --help` shows help
-- `td "text"` adds a new item at the bottom
-- `td -t "text"` or `td --top "text"` adds at the top
-- `td -b "text"` or `td --bottom "text"` adds at the bottom
+- `td text` adds a new item at the bottom (multi-word, no quotes needed)
+- `td -t text` or `td --top text` adds at the top
+- `td -b text` or `td --bottom text` adds at the bottom
 - `td -l` or `td --list` lists open items
 - `td -la` or `td --list-all` lists all items including done ones
 - `td -d <N>` or `td --delete <N>` deletes open item #N (matches numbering from `td -l`)
@@ -82,7 +79,7 @@ Open-only output omits checkboxes; `-la` includes them.
 - `K` or `Shift+Up`: move selected item up
 - `d`: delete the selected item
 - `D`: delete all done items
-- `H`: toggle hidden vs visible done items and persist that preference
+- `h`: toggle hidden vs visible done items and persist that preference
 - `?`: expand help
 - `Esc`: cancel editing or add mode
 - `q`: quit
