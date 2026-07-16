@@ -80,6 +80,7 @@ Open-only output omits checkboxes; `-la` includes them.
 - `d`: delete the selected item
 - `D`: delete all done items
 - `h`: toggle hidden vs visible done items and persist that preference
+- `w`: toggle text wrapping for long items
 - `?`: expand help
 - `Esc`: cancel editing or add mode
 - `q`: quit

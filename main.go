@@ -450,6 +450,7 @@ func printHelp() {
 	fmt.Println("  d        delete item")
 	fmt.Println("  D        delete all done")
 	fmt.Println("  h        hide done")
+	fmt.Println("  w        wrap text")
 	fmt.Println("  q        quit")
 	fmt.Println()
 	fmt.Printf("Data file: %s\n", globalDataPath())
@@ -525,6 +526,8 @@ type keyMap struct {
 	Quit      key.Binding
 	Cancel    key.Binding
 	Help      key.Binding
+	WrapText  key.Binding
+	width     int
 }
 
 func (k keyMap) ShortHelp() []key.Binding {
@@ -532,7 +535,38 @@ func (k keyMap) ShortHelp() []key.Binding {
 }
 
 func (k keyMap) FullHelp() [][]key.Binding {
-	return [][]key.Binding{{k.Up, k.Down, k.Top, k.Bottom}, {k.EditStart, k.EditEnd, k.OpenBelow, k.OpenAbove}, {k.Toggle, k.Delete, k.ClearDone, k.MoveUp}, {k.MoveDown, k.ToggleAll, k.Help}, {k.Cancel, k.Quit}}
+	switch {
+	case k.width > 0 && k.width < 58:
+		return [][]key.Binding{
+			{k.Up, k.Down, k.Top, k.Bottom, k.EditStart, k.EditEnd, k.OpenBelow, k.OpenAbove, k.Toggle, k.Delete, k.ClearDone, k.MoveUp, k.MoveDown, k.ToggleAll, k.WrapText, k.Help, k.Cancel, k.Quit},
+		}
+	case k.width < 82:
+		return [][]key.Binding{
+			{k.Up, k.Down, k.Top, k.Bottom, k.EditStart, k.EditEnd, k.OpenBelow, k.OpenAbove, k.Cancel},
+			{k.Toggle, k.Delete, k.ClearDone, k.MoveUp, k.MoveDown, k.ToggleAll, k.WrapText, k.Help, k.Quit},
+		}
+	case k.width < 105:
+		return [][]key.Binding{
+			{k.Up, k.Down, k.Top, k.Bottom},
+			{k.EditStart, k.EditEnd, k.OpenBelow, k.OpenAbove, k.Cancel, k.Quit},
+			{k.Toggle, k.Delete, k.ClearDone, k.MoveUp, k.MoveDown, k.ToggleAll, k.WrapText, k.Help},
+		}
+	case k.width < 130:
+		return [][]key.Binding{
+			{k.Up, k.Down, k.Top, k.Bottom},
+			{k.EditStart, k.EditEnd, k.OpenBelow, k.OpenAbove},
+			{k.Toggle, k.Delete, k.ClearDone, k.MoveUp, k.MoveDown},
+			{k.ToggleAll, k.WrapText, k.Help, k.Cancel, k.Quit},
+		}
+	default:
+		return [][]key.Binding{
+			{k.Up, k.Down, k.Top, k.Bottom},
+			{k.EditStart, k.EditEnd, k.OpenBelow, k.OpenAbove},
+			{k.Toggle, k.Delete, k.ClearDone, k.MoveUp},
+			{k.MoveDown, k.ToggleAll, k.WrapText, k.Help},
+			{k.Cancel, k.Quit},
+		}
+	}
 }
 
 var keys = keyMap{
@@ -604,6 +638,10 @@ var keys = keyMap{
 		key.WithKeys("?"),
 		key.WithHelp("?", "toggle help"),
 	),
+	WrapText: key.NewBinding(
+		key.WithKeys("w"),
+		key.WithHelp("w", "wrap text"),
+	),
 }
 
 type model struct {
@@ -626,6 +664,7 @@ type model struct {
 	err                   error
 	width                 int
 	height                int
+	wrapText              bool
 }
 
 func newModel(s store, location storeLocation) model {
@@ -654,6 +693,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		m.help.Width = msg.Width - 4
+		keys.width = msg.Width - 4
 	case completionFrameMsg:
 		if m.animatingDoneFrames > 0 {
 			m.animatingDoneFrames--
@@ -758,6 +799,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else if len(m.visibleIndexes()) > 0 {
 				m.startDirectionalNewItem(true, 1)
 			}
+		case key.Matches(msg, keys.WrapText):
+			m.pendingG = false
+			m.wrapText = !m.wrapText
 		case key.Matches(msg, keys.ToggleAll):
 			m.pendingG = false
 			selectedIdx := -1
@@ -876,21 +920,32 @@ func (m model) View() string {
 
 		item := m.store.Items[idx]
 		timestamp := taskTimestampText(item, now)
+		if !m.wrapText && m.width < 80 && !item.Done {
+			timestamp = ""
+		}
 		isSelected := row == m.cursor && !m.isEditingNewItem()
 		cursor := "  "
 		if isSelected {
 			cursor = accentStyle.Render("->")
 		}
 
-		checkbox, text := m.rowAppearance(idx, item.Description, item.Done, isSelected, contentWidth, timestamp)
-		left := fmt.Sprintf("%s %s %s", cursor, checkbox, text)
-		line := renderAlignedRow(left, timestamp, contentWidth, isSelected)
-		if isSelected {
-			b.WriteString(line)
+		if m.wrapText {
+			checkbox, textLines := m.rowWrappedAppearance(idx, item.Description, item.Done, isSelected, contentWidth, timestamp)
+			prefix := fmt.Sprintf("%s %s ", cursor, checkbox)
+			indent := strings.Repeat(" ", lipgloss.Width(prefix))
+			b.WriteString(prefix + textLines[0] + "\n")
+			for _, tl := range textLines[1:] {
+				b.WriteString(indent + tl + "\n")
+			}
+			if timestamp != "" {
+				b.WriteString(indent + renderTimestampText(timestamp, isSelected) + "\n")
+			}
 		} else {
-			b.WriteString(line)
+			checkbox, text := m.rowAppearance(idx, item.Description, item.Done, isSelected, contentWidth, timestamp)
+			left := fmt.Sprintf("%s %s %s", cursor, checkbox, text)
+			b.WriteString(renderAlignedRow(left, timestamp, contentWidth, isSelected))
+			b.WriteString("\n")
 		}
-		b.WriteString("\n")
 	}
 
 	if m.isEditingNewItem() && insertRow == len(visible) {
@@ -1049,6 +1104,84 @@ func truncateStyledText(text string, width int) string {
 		visible = lipgloss.NewStyle().MaxWidth(lipgloss.Width(visible)-1).Inline(true).Render(visible)
 	}
 	return visible + "…"
+}
+
+func wordWrapPlain(text string, width int) []string {
+	if width <= 0 {
+		return []string{text}
+	}
+	words := strings.Fields(text)
+	if len(words) == 0 {
+		return []string{""}
+	}
+	var lines []string
+	var current strings.Builder
+	currentWidth := 0
+	for _, word := range words {
+		ww := lipgloss.Width(word)
+		if current.Len() == 0 {
+			current.WriteString(word)
+			currentWidth = ww
+		} else if currentWidth+1+ww <= width {
+			current.WriteByte(' ')
+			current.WriteString(word)
+			currentWidth += 1 + ww
+		} else {
+			lines = append(lines, current.String())
+			current.Reset()
+			current.WriteString(word)
+			currentWidth = ww
+		}
+	}
+	if current.Len() > 0 {
+		lines = append(lines, current.String())
+	}
+	return lines
+}
+
+func (m model) rowWrappedAppearance(idx int, description string, done bool, selected bool, rowWidth int, timestamp string) (string, []string) {
+	wrapWidth := availableDescriptionWidth(rowWidth, selected, "")
+	plainLines := wordWrapPlain(description, wrapWidth)
+
+	if idx == m.animatingDoneIndex && m.animatingDoneFrames > 0 {
+		checkbox, _ := m.animatedDoneAppearance(description)
+		styled := make([]string, len(plainLines))
+		for i, l := range plainLines {
+			styled[i] = lipgloss.NewStyle().Foreground(foreground).Render(l)
+		}
+		return checkbox, styled
+	}
+
+	textStyle := lipgloss.NewStyle()
+	if selected {
+		textStyle = textStyle.Background(background)
+	}
+
+	checkbox := openBoxStyle.Render("[ ]")
+	var applyStyle func(string) string
+	if done {
+		boxStyle := doneBoxStyle
+		if selected {
+			boxStyle = boxStyle.Background(background)
+		}
+		checkbox = boxStyle.Render("[✓]")
+		applyStyle = func(s string) string {
+			return textStyle.Foreground(doneColor).Strikethrough(true).Render(s)
+		}
+	} else {
+		if selected {
+			checkbox = openBoxStyle.Background(background).Render("[ ]")
+		}
+		applyStyle = func(s string) string {
+			return textStyle.Foreground(foreground).Render(s)
+		}
+	}
+
+	styled := make([]string, len(plainLines))
+	for i, l := range plainLines {
+		styled[i] = applyStyle(l)
+	}
+	return checkbox, styled
 }
 
 func renderTimestampText(text string, selected bool) string {
