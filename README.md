@@ -79,6 +79,8 @@ Open-only output omits checkboxes; `-la` includes them.
 - `K` or `Shift+Up`: move selected item up
 - `d`: delete the selected item
 - `D`: delete all done items
+- `y`: yank (copy) the current item's text to the clipboard — the line flashes to confirm
+- `p`: paste clipboard text as a new item below the cursor
 - `h`: toggle hidden vs visible done items and persist that preference
 - `w`: toggle text wrapping for long items
 - `?`: expand help

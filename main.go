@@ -32,6 +32,7 @@ type store struct {
 type addPosition int
 
 type completionFrameMsg struct{}
+type yankFrameMsg struct{}
 
 type editMode int
 
@@ -449,6 +450,8 @@ func printHelp() {
 	fmt.Println("  x/enter  toggle done")
 	fmt.Println("  d        delete item")
 	fmt.Println("  D        delete all done")
+	fmt.Println("  y        yank/copy item to clipboard")
+	fmt.Println("  p        paste clipboard as new item below")
 	fmt.Println("  h        hide done")
 	fmt.Println("  w        wrap text")
 	fmt.Println("  q        quit")
@@ -527,6 +530,8 @@ type keyMap struct {
 	Cancel    key.Binding
 	Help      key.Binding
 	WrapText  key.Binding
+	Yank      key.Binding
+	Paste     key.Binding
 	width     int
 }
 
@@ -538,25 +543,25 @@ func (k keyMap) FullHelp() [][]key.Binding {
 	switch {
 	case k.width > 0 && k.width < 58:
 		return [][]key.Binding{
-			{k.Up, k.Down, k.Top, k.Bottom, k.EditStart, k.EditEnd, k.OpenBelow, k.OpenAbove, k.Toggle, k.Delete, k.ClearDone, k.MoveUp, k.MoveDown, k.ToggleAll, k.WrapText, k.Help, k.Cancel, k.Quit},
+			{k.Up, k.Down, k.Top, k.Bottom, k.EditStart, k.EditEnd, k.OpenBelow, k.OpenAbove, k.Toggle, k.Delete, k.ClearDone, k.MoveUp, k.MoveDown, k.ToggleAll, k.WrapText, k.Yank, k.Paste, k.Help, k.Cancel, k.Quit},
 		}
 	case k.width < 82:
 		return [][]key.Binding{
 			{k.Up, k.Down, k.Top, k.Bottom, k.EditStart, k.EditEnd, k.OpenBelow, k.OpenAbove, k.Cancel},
-			{k.Toggle, k.Delete, k.ClearDone, k.MoveUp, k.MoveDown, k.ToggleAll, k.WrapText, k.Help, k.Quit},
+			{k.Toggle, k.Delete, k.ClearDone, k.MoveUp, k.MoveDown, k.ToggleAll, k.WrapText, k.Yank, k.Paste, k.Help, k.Quit},
 		}
 	case k.width < 105:
 		return [][]key.Binding{
 			{k.Up, k.Down, k.Top, k.Bottom},
 			{k.EditStart, k.EditEnd, k.OpenBelow, k.OpenAbove, k.Cancel, k.Quit},
-			{k.Toggle, k.Delete, k.ClearDone, k.MoveUp, k.MoveDown, k.ToggleAll, k.WrapText, k.Help},
+			{k.Toggle, k.Delete, k.ClearDone, k.MoveUp, k.MoveDown, k.ToggleAll, k.WrapText, k.Yank, k.Paste, k.Help},
 		}
 	case k.width < 130:
 		return [][]key.Binding{
 			{k.Up, k.Down, k.Top, k.Bottom},
 			{k.EditStart, k.EditEnd, k.OpenBelow, k.OpenAbove},
 			{k.Toggle, k.Delete, k.ClearDone, k.MoveUp, k.MoveDown},
-			{k.ToggleAll, k.WrapText, k.Help, k.Cancel, k.Quit},
+			{k.ToggleAll, k.WrapText, k.Yank, k.Paste, k.Help, k.Cancel, k.Quit},
 		}
 	default:
 		return [][]key.Binding{
@@ -564,7 +569,7 @@ func (k keyMap) FullHelp() [][]key.Binding {
 			{k.EditStart, k.EditEnd, k.OpenBelow, k.OpenAbove},
 			{k.Toggle, k.Delete, k.ClearDone, k.MoveUp},
 			{k.MoveDown, k.ToggleAll, k.WrapText, k.Help},
-			{k.Cancel, k.Quit},
+			{k.Yank, k.Paste, k.Cancel, k.Quit},
 		}
 	}
 }
@@ -642,6 +647,14 @@ var keys = keyMap{
 		key.WithKeys("w"),
 		key.WithHelp("w", "wrap text"),
 	),
+	Yank: key.NewBinding(
+		key.WithKeys("y"),
+		key.WithHelp("y", "yank/copy"),
+	),
+	Paste: key.NewBinding(
+		key.WithKeys("p"),
+		key.WithHelp("p", "paste below"),
+	),
 }
 
 type model struct {
@@ -661,6 +674,8 @@ type model struct {
 	animatingDoneIndex    int
 	animatingDoneFrames   int
 	animatingDoneCursor   int
+	yankAnimatingIndex    int
+	yankAnimatingFrames   int
 	err                   error
 	width                 int
 	height                int
@@ -681,6 +696,7 @@ func newModel(s store, location storeLocation) model {
 		insertAt:           -1,
 		editIndex:          -1,
 		animatingDoneIndex: -1,
+		yankAnimatingIndex: -1,
 	}
 }
 
@@ -704,6 +720,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cursor = m.animatingDoneCursor
 			m.clampCursor()
 			m.animatingDoneIndex = -1
+		}
+	case yankFrameMsg:
+		if m.yankAnimatingFrames > 0 {
+			m.yankAnimatingFrames--
+			if m.yankAnimatingFrames > 0 {
+				return m, nextYankFrame()
+			}
+			m.yankAnimatingIndex = -1
 		}
 	case tea.KeyMsg:
 		if m.isEditing() {
@@ -849,6 +873,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, keys.MoveDown):
 			m.pendingG = false
 			if err := m.moveCurrent(1); err != nil {
+				m.err = err
+				return m, tea.Quit
+			}
+		case key.Matches(msg, keys.Yank):
+			m.pendingG = false
+			return m, m.yankCurrent()
+		case key.Matches(msg, keys.Paste):
+			m.pendingG = false
+			if err := m.pasteFromClipboard(); err != nil {
 				m.err = err
 				return m, tea.Quit
 			}
@@ -1039,6 +1072,10 @@ func (m model) rowAppearance(idx int, description string, done bool, selected bo
 		checkbox, text := m.animatedDoneAppearance(description)
 		return checkbox, truncateStyledText(text, availableDescriptionWidth(rowWidth, selected, timestamp))
 	}
+	if idx == m.yankAnimatingIndex && m.yankAnimatingFrames > 0 {
+		checkbox, text := m.animatedYankAppearance(description)
+		return checkbox, truncateStyledText(text, availableDescriptionWidth(rowWidth, selected, timestamp))
+	}
 
 	textStyle := lipgloss.NewStyle()
 	if selected {
@@ -1148,6 +1185,20 @@ func (m model) rowWrappedAppearance(idx int, description string, done bool, sele
 		styled := make([]string, len(plainLines))
 		for i, l := range plainLines {
 			styled[i] = lipgloss.NewStyle().Foreground(foreground).Render(l)
+		}
+		return checkbox, styled
+	}
+	if idx == m.yankAnimatingIndex && m.yankAnimatingFrames > 0 {
+		checkbox, _ := m.animatedYankAppearance(description)
+		var textStyle lipgloss.Style
+		if m.yankAnimatingFrames == 2 {
+			textStyle = lipgloss.NewStyle().Foreground(accent).Bold(true)
+		} else {
+			textStyle = lipgloss.NewStyle().Foreground(foreground)
+		}
+		styled := make([]string, len(plainLines))
+		for i, l := range plainLines {
+			styled[i] = textStyle.Render(l)
 		}
 		return checkbox, styled
 	}
@@ -1357,6 +1408,68 @@ func nextCompletionFrame() tea.Cmd {
 	return tea.Tick(70*time.Millisecond, func(time.Time) tea.Msg {
 		return completionFrameMsg{}
 	})
+}
+
+func nextYankFrame() tea.Cmd {
+	return tea.Tick(80*time.Millisecond, func(time.Time) tea.Msg {
+		return yankFrameMsg{}
+	})
+}
+
+func (m model) animatedYankAppearance(description string) (string, string) {
+	yankStyle := lipgloss.NewStyle().Foreground(accent).Bold(true)
+	if m.yankAnimatingFrames == 2 {
+		return yankStyle.Render("[y]"), yankStyle.Render(description)
+	}
+	return yankStyle.Render("[y]"), lipgloss.NewStyle().Foreground(foreground).Render(description)
+}
+
+func (m *model) yankCurrent() tea.Cmd {
+	visible := m.visibleIndexes()
+	if len(visible) == 0 {
+		return nil
+	}
+	idx := visible[m.cursor]
+	text := m.store.Items[idx].Description
+	if err := writeClipboard(text); err != nil {
+		return nil
+	}
+	m.yankAnimatingIndex = idx
+	m.yankAnimatingFrames = 2
+	return nextYankFrame()
+}
+
+func (m *model) pasteFromClipboard() error {
+	text, err := readClipboard()
+	if err != nil || strings.TrimSpace(text) == "" {
+		return nil
+	}
+	text = strings.TrimSpace(text)
+	insertAt := m.currentInsertIndex(true)
+	newItem := todo{Description: text, CreatedAt: time.Now()}
+	m.store.Items = append(m.store.Items, todo{})
+	copy(m.store.Items[insertAt+1:], m.store.Items[insertAt:])
+	m.store.Items[insertAt] = newItem
+	if err := saveStore(m.location.Path, m.store); err != nil {
+		return err
+	}
+	m.cursor = m.cursorForIndex(insertAt)
+	m.clampCursor()
+	return nil
+}
+
+func writeClipboard(text string) error {
+	cmd := exec.Command("pbcopy")
+	cmd.Stdin = strings.NewReader(text)
+	return cmd.Run()
+}
+
+func readClipboard() (string, error) {
+	out, err := exec.Command("pbpaste").Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimRight(string(out), "\n"), nil
 }
 
 func (m *model) moveCurrent(delta int) error {
