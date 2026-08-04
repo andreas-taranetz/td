@@ -953,8 +953,12 @@ func (m model) View() string {
 
 		item := m.store.Items[idx]
 		timestamp := taskTimestampText(item, now)
-		if !m.wrapText && m.width < 80 && !item.Done {
-			timestamp = ""
+		if !item.Done {
+			if m.width < 60 {
+				timestamp = ""
+			} else if m.width < 80 {
+				timestamp = formatRelativeTaskTime(item.CreatedAt, now)
+			}
 		}
 		isSelected := row == m.cursor && !m.isEditingNewItem()
 		cursor := "  "
