@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -452,6 +453,7 @@ func printHelp() {
 	fmt.Println("  D        delete all done")
 	fmt.Println("  y        yank/copy item to clipboard")
 	fmt.Println("  p        paste clipboard as new item below")
+	fmt.Println("  l        open link(s) in item")
 	fmt.Println("  h        hide done")
 	fmt.Println("  w        wrap text")
 	fmt.Println("  q        quit")
@@ -532,6 +534,7 @@ type keyMap struct {
 	WrapText  key.Binding
 	Yank      key.Binding
 	Paste     key.Binding
+	OpenLinks key.Binding
 	width     int
 }
 
@@ -543,25 +546,25 @@ func (k keyMap) FullHelp() [][]key.Binding {
 	switch {
 	case k.width > 0 && k.width < 58:
 		return [][]key.Binding{
-			{k.Up, k.Down, k.Top, k.Bottom, k.EditStart, k.EditEnd, k.OpenBelow, k.OpenAbove, k.Toggle, k.Delete, k.ClearDone, k.MoveUp, k.MoveDown, k.ToggleAll, k.WrapText, k.Yank, k.Paste, k.Help, k.Cancel, k.Quit},
+			{k.Up, k.Down, k.Top, k.Bottom, k.EditStart, k.EditEnd, k.OpenBelow, k.OpenAbove, k.Toggle, k.Delete, k.ClearDone, k.MoveUp, k.MoveDown, k.ToggleAll, k.WrapText, k.Yank, k.Paste, k.OpenLinks, k.Help, k.Cancel, k.Quit},
 		}
 	case k.width < 82:
 		return [][]key.Binding{
 			{k.Up, k.Down, k.Top, k.Bottom, k.EditStart, k.EditEnd, k.OpenBelow, k.OpenAbove, k.Cancel},
-			{k.Toggle, k.Delete, k.ClearDone, k.MoveUp, k.MoveDown, k.ToggleAll, k.WrapText, k.Yank, k.Paste, k.Help, k.Quit},
+			{k.Toggle, k.Delete, k.ClearDone, k.MoveUp, k.MoveDown, k.ToggleAll, k.WrapText, k.Yank, k.Paste, k.OpenLinks, k.Help, k.Quit},
 		}
 	case k.width < 105:
 		return [][]key.Binding{
 			{k.Up, k.Down, k.Top, k.Bottom},
 			{k.EditStart, k.EditEnd, k.OpenBelow, k.OpenAbove, k.Cancel, k.Quit},
-			{k.Toggle, k.Delete, k.ClearDone, k.MoveUp, k.MoveDown, k.ToggleAll, k.WrapText, k.Yank, k.Paste, k.Help},
+			{k.Toggle, k.Delete, k.ClearDone, k.MoveUp, k.MoveDown, k.ToggleAll, k.WrapText, k.Yank, k.Paste, k.OpenLinks, k.Help},
 		}
 	case k.width < 130:
 		return [][]key.Binding{
 			{k.Up, k.Down, k.Top, k.Bottom},
 			{k.EditStart, k.EditEnd, k.OpenBelow, k.OpenAbove},
 			{k.Toggle, k.Delete, k.ClearDone, k.MoveUp, k.MoveDown},
-			{k.ToggleAll, k.WrapText, k.Yank, k.Paste, k.Help, k.Cancel, k.Quit},
+			{k.ToggleAll, k.WrapText, k.Yank, k.Paste, k.OpenLinks, k.Help, k.Cancel, k.Quit},
 		}
 	default:
 		return [][]key.Binding{
@@ -569,7 +572,7 @@ func (k keyMap) FullHelp() [][]key.Binding {
 			{k.EditStart, k.EditEnd, k.OpenBelow, k.OpenAbove},
 			{k.Toggle, k.Delete, k.ClearDone, k.MoveUp},
 			{k.MoveDown, k.ToggleAll, k.WrapText, k.Help},
-			{k.Yank, k.Paste, k.Cancel, k.Quit},
+			{k.Yank, k.Paste, k.OpenLinks, k.Cancel, k.Quit},
 		}
 	}
 }
@@ -654,6 +657,10 @@ var keys = keyMap{
 	Paste: key.NewBinding(
 		key.WithKeys("p"),
 		key.WithHelp("p", "paste below"),
+	),
+	OpenLinks: key.NewBinding(
+		key.WithKeys("l"),
+		key.WithHelp("l", "open link(s)"),
 	),
 }
 
@@ -885,6 +892,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.err = err
 				return m, tea.Quit
 			}
+		case key.Matches(msg, keys.OpenLinks):
+			m.pendingG = false
+			return m, m.openLinksInCurrent()
 		default:
 			m.pendingG = false
 		}
@@ -1474,6 +1484,30 @@ func readClipboard() (string, error) {
 		return "", err
 	}
 	return strings.TrimRight(string(out), "\n"), nil
+}
+
+var urlRegexp = regexp.MustCompile(`https?://\S+`)
+
+func extractURLs(text string) []string {
+	return urlRegexp.FindAllString(text, -1)
+}
+
+func (m model) openLinksInCurrent() tea.Cmd {
+	visible := m.visibleIndexes()
+	if len(visible) == 0 {
+		return nil
+	}
+	idx := visible[m.cursor]
+	urls := extractURLs(m.store.Items[idx].Description)
+	if len(urls) == 0 {
+		return nil
+	}
+	return func() tea.Msg {
+		for _, u := range urls {
+			exec.Command("open", u).Start() //nolint:errcheck
+		}
+		return nil
+	}
 }
 
 func (m *model) moveCurrent(delta int) error {

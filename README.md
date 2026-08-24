@@ -81,6 +81,7 @@ Open-only output omits checkboxes; `-la` includes them.
 - `D`: delete all done items
 - `y`: yank (copy) the current item's text to the clipboard — the line flashes to confirm
 - `p`: paste clipboard text as a new item below the cursor
+- `l`: open all URLs found in the current item in the default browser
 - `h`: toggle hidden vs visible done items and persist that preference
 - `w`: toggle text wrapping for long items
 - `?`: expand help
