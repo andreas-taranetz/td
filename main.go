@@ -1489,7 +1489,11 @@ func readClipboard() (string, error) {
 var urlRegexp = regexp.MustCompile(`https?://\S+`)
 
 func extractURLs(text string) []string {
-	return urlRegexp.FindAllString(text, -1)
+	matches := urlRegexp.FindAllString(text, -1)
+	for i, u := range matches {
+		matches[i] = strings.TrimRight(u, "])[}>\"'.,;!")
+	}
+	return matches
 }
 
 func (m model) openLinksInCurrent() tea.Cmd {
