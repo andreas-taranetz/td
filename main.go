@@ -678,9 +678,8 @@ type model struct {
 	insertAt              int
 	editIndex             int
 	pendingG              bool
-	animatingDoneIndex    int
-	animatingDoneFrames   int
-	animatingDoneCursor   int
+	animatingDoneIndex  int
+	animatingDoneFrames int
 	yankAnimatingIndex    int
 	yankAnimatingFrames   int
 	err                   error
@@ -724,9 +723,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.animatingDoneFrames > 0 {
 				return m, nextCompletionFrame()
 			}
-			m.cursor = m.animatingDoneCursor
-			m.clampCursor()
 			m.animatingDoneIndex = -1
+			m.clampCursor()
 		}
 	case yankFrameMsg:
 		if m.yankAnimatingFrames > 0 {
@@ -1056,9 +1054,7 @@ func (m *model) toggleCurrent() (tea.Cmd, error) {
 
 	if !wasDone && m.store.Items[idx].Done {
 		m.animatingDoneIndex = idx
-		m.animatingDoneFrames = 4
-		m.animatingDoneCursor = m.cursor
-		m.clampCursor()
+		m.animatingDoneFrames = doneAnimFrames
 		return nextCompletionFrame(), nil
 	}
 
@@ -1069,16 +1065,39 @@ func (m *model) toggleCurrent() (tea.Cmd, error) {
 }
 
 func (m model) animatedDoneAppearance(description string) (string, string) {
-	switch m.animatingDoneFrames {
-	case 4:
-		return accentStyle.Render("[•]"), lipgloss.NewStyle().Foreground(foreground).Render(description)
-	case 3:
-		return accentStyle.Render("[✔]"), lipgloss.NewStyle().Foreground(foreground).Bold(true).Render(description)
-	case 2:
-		return lipgloss.NewStyle().Foreground(lipgloss.Color("79")).Render("[✓]"), lipgloss.NewStyle().Foreground(foreground).Render(description)
+	runes := []rune(description)
+	textLen := len(runes)
+
+	// frames counts down from doneAnimFrames to 1; step counts up from 1 to doneAnimFrames
+	step := doneAnimFrames + 1 - m.animatingDoneFrames
+
+	// Checkbox: 3 states spread evenly across all frames
+	var checkbox string
+	switch {
+	case m.animatingDoneFrames > doneAnimFrames*2/3:
+		checkbox = accentStyle.Render("[•]")
+	case m.animatingDoneFrames > doneAnimFrames/3:
+		checkbox = accentStyle.Render("[✔]")
 	default:
-		return doneBoxStyle.Render("[✓]"), doneTextStyle.Render(description)
+		checkbox = lipgloss.NewStyle().Foreground(lipgloss.Color("79")).Render("[✓]")
 	}
+
+	// Text: strikethrough sweeps left to right across all frames
+	charsToStrike := step * textLen / doneAnimFrames
+	if charsToStrike > textLen {
+		charsToStrike = textLen
+	}
+
+	struck := lipgloss.NewStyle().Foreground(doneColor).Strikethrough(true).Render(string(runes[:charsToStrike]))
+	var text string
+	if charsToStrike < textLen {
+		normal := lipgloss.NewStyle().Foreground(foreground).Render(string(runes[charsToStrike:]))
+		text = struck + normal
+	} else {
+		text = struck
+	}
+
+	return checkbox, text
 }
 
 func (m model) rowAppearance(idx int, description string, done bool, selected bool, rowWidth int, timestamp string) (string, string) {
@@ -1418,8 +1437,10 @@ func (m *model) backspaceInput() {
 	m.inputCursor--
 }
 
+const doneAnimFrames = 16
+
 func nextCompletionFrame() tea.Cmd {
-	return tea.Tick(70*time.Millisecond, func(time.Time) tea.Msg {
+	return tea.Tick(20*time.Millisecond, func(time.Time) tea.Msg {
 		return completionFrameMsg{}
 	})
 }
