@@ -22,6 +22,7 @@ td -p -d 1                # delete todo #1
 
 # Scope
 td -p -L -l               # use this folder's local list (created on first add)
+td -p --create-local -l   # this exact folder's list, even if a parent folder has one
 td -p -g -l               # force the global list
 td -p --remove-local      # delete this folder's local list (no confirmation)
 ```
@@ -39,8 +40,8 @@ No ANSI codes, no timestamps. Numbers are stable within a session — use `-l` o
 ## Storage
 
 - `~/Library/Application Support/td/todos.json` holds the global list and all folder-local lists
-- Without a scope flag, td uses the local list if the current folder already has one, otherwise the global list
-- `-L` forces the local list of the current folder (section is created by the first add); `-g` forces global
+- Without a scope flag, td uses the local list if the current folder or a parent folder already has one, otherwise the global list
+- `-L` forces the local list (the nearest existing one, else a new one for the current folder, created by the first add); `--create-local` uses the exact current folder's list and creates it if missing, even when a parent folder has one; `-g` forces global
 
 ## Gotchas
 

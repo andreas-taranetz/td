@@ -2,29 +2,29 @@ Output usage.gif
 
 Set FontSize 13
 Set Width 680
-Set Height 400
+Set Height 480
 Set Theme "Dracula"
 Set Shell "zsh"
 Set TypingSpeed 80ms
 
 # Setup: isolated data dir, demo binary on PATH
 Hide
-Type "export PATH=/tmp:$PATH && export HOME=/tmp/td-vhs-home && rm -rf $HOME && mkdir -p $HOME && clear"
+Type "export PATH=/tmp:$PATH && export HOME=/tmp/td-vhs-home && rm -rf $HOME && mkdir -p $HOME/projects/demo && cd $HOME/projects/demo && clear"
 Enter
 Sleep 300ms
 Show
 
 # Non-interactive: add todos — no quotes needed
-Type "td add vibe features"
+Type "td vibe code new features"
 Enter
 Sleep 700ms
 
-Type "td ship to prod"
+Type "td push straight to main"
 Enter
 Sleep 700ms
 
 # Add to top with -t
-Type "td -t review vibe PR"
+Type "td -t get coffee"
 Enter
 Sleep 800ms
 
@@ -38,31 +38,31 @@ Type "td"
 Enter
 Sleep 1s
 
-# Cursor on "review vibe PR" (top). Add new item below (o)
+# Cursor on "get coffee" (top). Add new item below (o)
 Type "o"
 Sleep 300ms
-Type "fix context overflow"
+Type "add below with o (then i, J/K, x)"
 Enter
 Sleep 700ms
 
-# Cursor is now on "fix context overflow". Go up one row
+# Cursor is now on "add below with o (then i, J/K, x)". Go up one row
 Type "k"
 Sleep 400ms
 
-# Cursor on "review vibe PR". Add new item above (O)
+# Cursor on "get coffee". Add new item above (O)
 Type "O"
 Sleep 300ms
-Type "write AI tests"
+Type "add above with O"
 Enter
 Sleep 700ms
 
-# Cursor on "write AI tests" (top). Navigate down two rows to "fix context overflow"
+# Cursor on "add above with O" (top). Navigate down two rows to "add below with o (then i, J/K, x)"
 Type "j"
 Sleep 350ms
 Type "j"
 Sleep 350ms
 
-# Edit "fix context overflow" — show vim-style block cursor
+# Edit "add below with o (then i, J/K, x)" — show vim-style block cursor
 Type "i"
 Sleep 500ms
 Right
@@ -80,16 +80,58 @@ Sleep 350ms
 Escape
 Sleep 600ms
 
-# Move "fix context overflow" down one position (J), then back up (K)
+# Move "add below with o (then i, J/K, x)" down one position (J), then back up (K)
 Type "J"
 Sleep 500ms
 Type "K"
 Sleep 600ms
 
-# Toggle "fix context overflow" done
+# Toggle "add below with o (then i, J/K, x)" done
 Type "x"
 Sleep 800ms
+
+# This folder has no local list yet: the status line hints at ctrl+l
+Sleep 1500ms
+
+# Switch to a local list for this folder (created on the first todo)
+Ctrl+L
+Sleep 1200ms
+Enter
+Sleep 300ms
+Type "add a folder scoped todo (notice the title)"
+Enter
+Sleep 700ms
+Type "o"
+Sleep 300ms
+Type "only visible in this folder"
+Enter
+Sleep 800ms
+
+# Overview of all lists: local section first, then global
+Ctrl+A
+Sleep 1500ms
+Type "}"
+Sleep 800ms
+Type "{"
+Sleep 800ms
+Type "x"
+Sleep 800ms
+Ctrl+A
+Sleep 600ms
+
+# Back to the global list
+Ctrl+G
+Sleep 1200ms
 
 # Quit
 Type "q"
 Sleep 500ms
+
+# Non-interactive: td picks the local list automatically, -g forces global
+Type "td -l"
+Enter
+Sleep 1500ms
+
+Type "td -g -l"
+Enter
+Sleep 1500ms

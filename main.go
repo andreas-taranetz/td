@@ -47,6 +47,8 @@ const (
 	scopeAuto scopeMode = iota
 	scopeGlobal
 	scopeLocal
+	// scopeCreateLocal is like scopeLocal but never inherits a parent's list.
+	scopeCreateLocal
 )
 
 type addPosition int
@@ -97,8 +99,41 @@ type storeLocation struct {
 	Dir string
 	// Local is true when the active list is the folder-scoped one.
 	Local bool
-	// HasLocal is true when the file already has a section for Dir.
+	// HasLocal is true when the file already has a section for Dir or one of its parents.
 	HasLocal bool
+	// LocalDir is the folder whose section backs the local list: the nearest
+	// match from Dir upwards, or Dir itself when none exists yet.
+	LocalDir string
+}
+
+// title names the folder of the local list so it is clear which list is shown.
+// A positive width truncates the path from its start so the end, the part
+// that tells projects apart, stays visible.
+func (l storeLocation) title(width int) string {
+	const prefix = "Todo: "
+	if !l.Local {
+		return "Todo:"
+	}
+
+	path := shortenPath(l.listDir())
+	// Room left after the app padding (2 per side) and the title's own padding.
+	if room := width - 4 - 2 - len(prefix); width > 0 {
+		runes := []rune(path)
+		switch {
+		case room < 2:
+			path = "…"
+		case len(runes) > room:
+			path = "…" + string(runes[len(runes)-room+1:])
+		}
+	}
+	return prefix + path
+}
+
+func (l storeLocation) listDir() string {
+	if l.LocalDir != "" {
+		return l.LocalDir
+	}
+	return l.Dir
 }
 
 const skillMD = `---
@@ -125,6 +160,7 @@ td -p -d 1                # delete todo #1
 
 # Scope
 td -p -L -l               # use this folder's local list (created on first add)
+td -p --create-local -l   # this exact folder's list, even if a parent folder has one
 td -p -g -l               # force the global list
 td -p --remove-local      # delete this folder's local list (no confirmation)
 ` + "```" + `
@@ -142,8 +178,8 @@ No ANSI codes, no timestamps. Numbers are stable within a session — use ` + "`
 ## Storage
 
 - ` + "`" + `~/Library/Application Support/td/todos.json` + "`" + ` holds the global list and all folder-local lists
-- Without a scope flag, td uses the local list if the current folder already has one, otherwise the global list
-- ` + "`" + `-L` + "`" + ` forces the local list of the current folder (section is created by the first add); ` + "`" + `-g` + "`" + ` forces global
+- Without a scope flag, td uses the local list if the current folder or a parent folder already has one, otherwise the global list
+- ` + "`" + `-L` + "`" + ` forces the local list (the nearest existing one, else a new one for the current folder, created by the first add); ` + "`" + `--create-local` + "`" + ` uses the exact current folder's list and creates it if missing, even when a parent folder has one; ` + "`" + `-g` + "`" + ` forces global
 
 ## Gotchas
 
@@ -219,6 +255,13 @@ func runRemoveLocal() error {
 	dir, err := currentDir()
 	if err != nil {
 		return err
+	}
+	file, err := readStoreFile(globalDataPath())
+	if err != nil {
+		return err
+	}
+	if localDir, ok := findLocalDir(file, dir); ok {
+		dir = localDir
 	}
 	removed, err := removeLocalStore(globalDataPath(), dir)
 	if err != nil {
@@ -319,16 +362,16 @@ func parseArgs(args []string) (runOptions, error) {
 				return runOptions{}, errors.New("remove-local flag cannot be combined with other action flags or todo text")
 			}
 			opts.action = actionRemoveLocal
-		case "-g", "--global":
-			if opts.scope == scopeLocal {
-				return runOptions{}, errors.New("global and local flags cannot be combined")
+		case "-g", "--global", "-L", "--local", "--create-local":
+			scope := map[string]scopeMode{
+				"-g": scopeGlobal, "--global": scopeGlobal,
+				"-L": scopeLocal, "--local": scopeLocal,
+				"--create-local": scopeCreateLocal,
+			}[arg]
+			if opts.scope != scopeAuto && opts.scope != scope {
+				return runOptions{}, errors.New("global, local and create-local flags cannot be combined")
 			}
-			opts.scope = scopeGlobal
-		case "-L", "--local":
-			if opts.scope == scopeGlobal {
-				return runOptions{}, errors.New("global and local flags cannot be combined")
-			}
-			opts.scope = scopeLocal
+			opts.scope = scope
 		default:
 			if strings.HasPrefix(arg, "-") {
 				return runOptions{}, fmt.Errorf("unknown flag: %s", arg)
@@ -432,12 +475,8 @@ func printTodos(s store, showAll bool, plain bool, location storeLocation) error
 	}
 
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("Todo:"))
+	b.WriteString(titleStyle.Render(location.title(0)))
 	b.WriteString("\n")
-	if location.Local {
-		b.WriteString(subtitleStyle.Render("local: " + location.Dir))
-		b.WriteString("\n")
-	}
 	b.WriteString("\n")
 	now := time.Now()
 	listWidth := 0
@@ -514,6 +553,7 @@ func printHelp() {
 	fmt.Printf("  %s -la             list all todos\n", cmd)
 	fmt.Printf("  %s -d 2            delete open todo #2\n", cmd)
 	fmt.Printf("  %s -L [...]        use this folder's local list (created on first add)\n", cmd)
+	fmt.Printf("  %s --create-local [...] use this exact folder's local list, creating it even if a parent has one\n", cmd)
 	fmt.Printf("  %s -g [...]        use the global list\n", cmd)
 	fmt.Printf("  %s --remove-local  delete this folder's local list\n", cmd)
 	fmt.Printf("  %s -p -l           plain output (no colors/timestamps)\n", cmd)
@@ -536,15 +576,16 @@ func printHelp() {
 	fmt.Println("  y        yank/copy item to clipboard")
 	fmt.Println("  p        paste clipboard as new item below")
 	fmt.Println("  l        open link(s) in item")
-	fmt.Println("  h        hide done")
+	fmt.Println("  h        show/hide done")
 	fmt.Println("  w        wrap text")
 	fmt.Println("  ctrl+l   switch to this folder's local list")
 	fmt.Println("  ctrl+g   switch to the global list")
+	fmt.Println("  ctrl+a   overview of open todos in all lists (same item keys as the list; }/{ jump between lists)")
 	fmt.Println("  ctrl+x   remove this folder's local list (asks to confirm)")
 	fmt.Println("  q        quit")
 	fmt.Println()
 	fmt.Printf("Data file: %s\n", globalDataPath())
-	fmt.Println("Without -g/-L, the local list is used if this folder already has one.")
+	fmt.Println("Without -g/-L, the local list is used if this folder or a parent already has one.")
 }
 
 func commandName() string {
@@ -598,18 +639,58 @@ func loadStore(mode scopeMode) (store, storeLocation, error) {
 	return loadStoreAt(globalDataPath(), dir, mode)
 }
 
+// homeDir is symlink-resolved like currentDir, so the two stay comparable.
+func homeDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	if resolved, err := filepath.EvalSymlinks(home); err == nil {
+		home = resolved
+	}
+	return home
+}
+
+// findLocalDir returns the nearest folder from dir upwards that has a local
+// section. The home directory only matches when it is dir itself, otherwise a
+// list there would capture every folder below it.
+func findLocalDir(file store, dir string) (string, bool) {
+	if _, ok := file.Folders[dir]; ok {
+		return dir, true
+	}
+
+	home := homeDir()
+	for parent := filepath.Dir(dir); parent != dir; parent = filepath.Dir(parent) {
+		dir = parent
+		if dir == home {
+			break
+		}
+		if _, ok := file.Folders[dir]; ok {
+			return dir, true
+		}
+	}
+	return "", false
+}
+
 func loadStoreAt(path, dir string, mode scopeMode) (store, storeLocation, error) {
 	file, err := readStoreFile(path)
 	if err != nil {
 		return store{}, storeLocation{}, err
 	}
 
-	folder, hasLocal := file.Folders[dir]
-	local := mode == scopeLocal || (mode == scopeAuto && hasLocal)
-	location := storeLocation{Path: path, Dir: dir, Local: local, HasLocal: hasLocal}
+	localDir, hasLocal := findLocalDir(file, dir)
+	if mode == scopeCreateLocal {
+		_, hasLocal = file.Folders[dir]
+		localDir = dir
+	}
+	if !hasLocal {
+		localDir = dir
+	}
+	local := mode == scopeLocal || mode == scopeCreateLocal || (mode == scopeAuto && hasLocal)
+	location := storeLocation{Path: path, Dir: dir, Local: local, HasLocal: hasLocal, LocalDir: localDir}
 
 	if local {
-		return store{Items: folder.Items, HideDoneInTUI: file.HideDoneInTUI, Dir: dir}, location, nil
+		return store{Items: file.Folders[localDir].Items, HideDoneInTUI: file.HideDoneInTUI, Dir: localDir}, location, nil
 	}
 	file.Folders = nil
 	return file, location, nil
@@ -696,6 +777,7 @@ type keyMap struct {
 	Local       key.Binding
 	Global      key.Binding
 	RemoveLocal key.Binding
+	Overview    key.Binding
 	width       int
 }
 
@@ -707,33 +789,33 @@ func (k keyMap) FullHelp() [][]key.Binding {
 	switch {
 	case k.width > 0 && k.width < 58:
 		return [][]key.Binding{
-			{k.Up, k.Down, k.Top, k.Bottom, k.EditStart, k.EditEnd, k.OpenBelow, k.OpenAbove, k.Toggle, k.Delete, k.ClearDone, k.MoveUp, k.MoveDown, k.ToggleAll, k.WrapText, k.Yank, k.Paste, k.OpenLinks, k.Local, k.Global, k.RemoveLocal, k.Help, k.Cancel, k.Quit},
+			{k.Up, k.Down, k.Top, k.Bottom, k.EditStart, k.EditEnd, k.OpenBelow, k.OpenAbove, k.Toggle, k.Delete, k.ClearDone, k.MoveUp, k.MoveDown, k.ToggleAll, k.WrapText, k.Yank, k.Paste, k.OpenLinks, k.Local, k.Global, k.Overview, k.RemoveLocal, k.Help, k.Cancel, k.Quit},
 		}
 	case k.width < 82:
 		return [][]key.Binding{
-			{k.Up, k.Down, k.Top, k.Bottom, k.EditStart, k.EditEnd, k.OpenBelow, k.OpenAbove, k.Cancel},
-			{k.Toggle, k.Delete, k.ClearDone, k.MoveUp, k.MoveDown, k.ToggleAll, k.WrapText, k.Yank, k.Paste, k.OpenLinks, k.Local, k.Global, k.RemoveLocal, k.Help, k.Quit},
+			{k.Up, k.Down, k.Top, k.Bottom, k.EditStart, k.EditEnd, k.OpenBelow, k.OpenAbove, k.Cancel, k.Toggle, k.Delete, k.ClearDone},
+			{k.MoveUp, k.MoveDown, k.ToggleAll, k.WrapText, k.Yank, k.Paste, k.OpenLinks, k.Local, k.Global, k.Overview, k.RemoveLocal, k.Help, k.Quit},
 		}
 	case k.width < 105:
 		return [][]key.Binding{
-			{k.Up, k.Down, k.Top, k.Bottom},
-			{k.EditStart, k.EditEnd, k.OpenBelow, k.OpenAbove, k.Cancel, k.Quit},
-			{k.Toggle, k.Delete, k.ClearDone, k.MoveUp, k.MoveDown, k.ToggleAll, k.WrapText, k.Yank, k.Paste, k.OpenLinks, k.Local, k.Global, k.RemoveLocal, k.Help},
+			{k.Up, k.Down, k.Top, k.Bottom, k.EditStart, k.EditEnd, k.OpenBelow, k.OpenAbove},
+			{k.Toggle, k.Delete, k.ClearDone, k.MoveUp, k.MoveDown, k.Yank, k.Paste, k.OpenLinks},
+			{k.ToggleAll, k.WrapText, k.Local, k.Global, k.Overview, k.RemoveLocal, k.Help, k.Cancel, k.Quit},
 		}
 	case k.width < 130:
 		return [][]key.Binding{
-			{k.Up, k.Down, k.Top, k.Bottom},
-			{k.EditStart, k.EditEnd, k.OpenBelow, k.OpenAbove},
-			{k.Toggle, k.Delete, k.ClearDone, k.MoveUp, k.MoveDown},
-			{k.ToggleAll, k.WrapText, k.Yank, k.Paste, k.OpenLinks, k.Local, k.Global, k.RemoveLocal, k.Help, k.Cancel, k.Quit},
+			{k.Up, k.Down, k.Top, k.Bottom, k.Help, k.Cancel, k.Quit},
+			{k.EditStart, k.EditEnd, k.OpenBelow, k.OpenAbove, k.Yank, k.Paste},
+			{k.Toggle, k.Delete, k.ClearDone, k.MoveUp, k.MoveDown, k.OpenLinks},
+			{k.ToggleAll, k.WrapText, k.Local, k.Global, k.Overview, k.RemoveLocal},
 		}
 	default:
 		return [][]key.Binding{
-			{k.Up, k.Down, k.Top, k.Bottom},
-			{k.EditStart, k.EditEnd, k.OpenBelow, k.OpenAbove},
-			{k.Toggle, k.Delete, k.ClearDone, k.MoveUp},
-			{k.MoveDown, k.ToggleAll, k.WrapText, k.Help},
-			{k.Yank, k.Paste, k.OpenLinks, k.Local, k.Global, k.RemoveLocal, k.Cancel, k.Quit},
+			{k.Up, k.Down, k.Top, k.Bottom, k.Help},
+			{k.EditStart, k.EditEnd, k.OpenBelow, k.OpenAbove, k.Cancel},
+			{k.Toggle, k.Delete, k.ClearDone, k.MoveUp, k.MoveDown},
+			{k.ToggleAll, k.WrapText, k.Yank, k.Paste, k.OpenLinks},
+			{k.Local, k.Global, k.Overview, k.RemoveLocal, k.Quit},
 		}
 	}
 }
@@ -793,7 +875,7 @@ var keys = keyMap{
 	),
 	ToggleAll: key.NewBinding(
 		key.WithKeys("h"),
-		key.WithHelp("h", "show all/open"),
+		key.WithHelp("h", "show/hide done"),
 	),
 	Quit: key.NewBinding(
 		key.WithKeys("q", "ctrl+c"),
@@ -825,15 +907,16 @@ var keys = keyMap{
 	),
 	Local: key.NewBinding(
 		key.WithKeys("ctrl+l"),
-		key.WithHelp("ctrl+l", "local list"),
+		key.WithHelp("ctrl+l", "show local"),
 	),
+	Overview: overviewKey,
 	RemoveLocal: key.NewBinding(
 		key.WithKeys("ctrl+x"),
 		key.WithHelp("ctrl+x", "remove local list"),
 	),
 	Global: key.NewBinding(
 		key.WithKeys("ctrl+g"),
-		key.WithHelp("ctrl+g", "global list"),
+		key.WithHelp("ctrl+g", "show global"),
 	),
 }
 
@@ -852,6 +935,14 @@ type model struct {
 	editIndex           int
 	pendingG            bool
 	confirmRemoveLocal  bool
+	overview            bool
+	ovRows              []ovRow
+	ovCursor            int
+	ovEditDir           string
+	ovEditRow           int
+	pendingBracket      string
+	ovOpen              int
+	ovDone              int
 	animatingDoneIndex  int
 	animatingDoneFrames int
 	yankAnimatingIndex  int
@@ -909,6 +1000,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.yankAnimatingIndex = -1
 		}
 	case tea.KeyMsg:
+		if m.overview && !m.isEditing() {
+			return m.updateOverview(msg)
+		}
 		if m.isEditing() {
 			if m.isDirectionalNewItemEdit() {
 				switch msg.Type {
@@ -1084,6 +1178,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.err = err
 				return m, tea.Quit
 			}
+		case key.Matches(msg, keys.Overview):
+			m.pendingG = false
+			if err := m.enterOverview(); err != nil {
+				m.err = err
+				return m, tea.Quit
+			}
 		case key.Matches(msg, keys.RemoveLocal):
 			m.pendingG = false
 			m.confirmRemoveLocal = m.location.Local
@@ -1102,8 +1202,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) View() string {
+	if m.overview {
+		return m.overviewView()
+	}
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("Todo:"))
+	b.WriteString(titleStyle.Render(m.location.title(m.width)))
 	b.WriteString("\n")
 	b.WriteString(subtitleStyle.Render(m.statusLine()))
 	b.WriteString("\n\n")
@@ -1129,7 +1232,7 @@ func (m model) View() string {
 			b.WriteString(mutedStyle.Render(m.editModeHelp()))
 			b.WriteString("\n\n")
 		}
-		b.WriteString(mutedStyle.Render("No items in this view. Press H to toggle filters."))
+		b.WriteString(mutedStyle.Render("No open items. Press h to show done items."))
 		b.WriteString("\n\n")
 		b.WriteString(m.help.View(keys))
 		return appStyle(m.width).Render(b.String())
@@ -1160,14 +1263,7 @@ func (m model) View() string {
 		}
 
 		item := m.store.Items[idx]
-		timestamp := taskTimestampText(item, now)
-		if !item.Done {
-			if m.width < 60 {
-				timestamp = ""
-			} else if m.width < 80 {
-				timestamp = formatRelativeTaskTime(item.CreatedAt, now)
-			}
-		}
+		timestamp := m.rowTimestamp(item, now)
 		isSelected := row == m.cursor && !m.isEditingNewItem()
 		cursor := "  "
 		if isSelected {
@@ -1206,6 +1302,19 @@ func (m model) View() string {
 	b.WriteString(m.help.View(keys))
 
 	return appStyle(m.width).Render(b.String())
+}
+
+// rowTimestamp shortens the timestamp of open items as the terminal narrows.
+func (m model) rowTimestamp(item todo, now time.Time) string {
+	timestamp := taskTimestampText(item, now)
+	if !item.Done {
+		if m.width < 60 {
+			return ""
+		} else if m.width < 80 {
+			return formatRelativeTaskTime(item.CreatedAt, now)
+		}
+	}
+	return timestamp
 }
 
 func (m model) visibleIndexes() []int {
@@ -1723,7 +1832,11 @@ func (m model) openLinksInCurrent() tea.Cmd {
 		return nil
 	}
 	idx := visible[m.cursor]
-	urls := extractURLs(m.store.Items[idx].Description)
+	return openLinksCmd(m.store.Items[idx].Description)
+}
+
+func openLinksCmd(description string) tea.Cmd {
+	urls := extractURLs(description)
 	if len(urls) == 0 {
 		return nil
 	}
@@ -1764,7 +1877,7 @@ func (m *model) switchScope(mode scopeMode) error {
 
 // removeLocal deletes the folder's section and falls back to the global list.
 func (m *model) removeLocal() error {
-	if _, err := removeLocalStore(m.location.Path, m.location.Dir); err != nil {
+	if _, err := removeLocalStore(m.location.Path, m.location.listDir()); err != nil {
 		return err
 	}
 	return m.switchScope(scopeGlobal)
@@ -1792,6 +1905,14 @@ func (m *model) moveCurrent(delta int) error {
 	return nil
 }
 
+func formatStatus(open, done int, scope string, showDone bool) string {
+	visibility := "hide done"
+	if showDone {
+		visibility = "show done"
+	}
+	return fmt.Sprintf("%d open, %d done • %s • %s", open, done, scope, visibility)
+}
+
 func (m model) statusLine() string {
 	open := 0
 	done := 0
@@ -1803,22 +1924,17 @@ func (m model) statusLine() string {
 		open++
 	}
 
-	mode := "showing all"
-	if !m.showAll {
-		mode = "showing open"
-	}
-
 	scope := "global"
 	if m.location.Local {
-		scope = "local: " + m.location.Dir
+		scope = "local"
 	}
 
-	status := fmt.Sprintf("%d open, %d done • %s • %s", open, done, mode, scope)
+	status := formatStatus(open, done, scope, m.showAll)
 	if !m.location.Local && !m.location.HasLocal && m.location.Dir != "" {
-		status += "\nNo list for this folder yet. Press ctrl+l to create one."
+		status += "\nPress ctrl+l to create a local todo list for this folder"
 	}
 	if m.location.Local && len(m.store.Items) == 0 && !m.confirmRemoveLocal {
-		status += "\nThis local list is empty. Press ctrl+x to remove it, ctrl+g for the global list."
+		status += "\nLocal list is empty. ctrl+x removes it, ctrl+g shows global."
 	}
 	if m.confirmRemoveLocal {
 		status += "\nRemove this folder's local list and all its todos? Press y to confirm, any other key cancels."
@@ -1860,6 +1976,9 @@ func appStyle(width int) lipgloss.Style {
 }
 
 func (m *model) commitInput() error {
+	if m.overview {
+		return m.commitOverviewInput()
+	}
 	description := strings.TrimSpace(m.input)
 	if description == "" {
 		return nil
