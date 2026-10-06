@@ -25,10 +25,29 @@ type todo struct {
 	DoneAt      time.Time `json:"done_at,omitempty"`
 }
 
-type store struct {
-	Items            []todo `json:"items"`
-	HideDoneInTUI    bool   `json:"hide_done_in_tui,omitempty"`
+type folderTodos struct {
+	Items []todo `json:"items"`
 }
+
+// store is both the on-disk file format and the in-memory view of one scope.
+// Views never carry Folders: saveStore merges them back into the file so
+// other scopes are preserved.
+type store struct {
+	Items         []todo                 `json:"items"`
+	HideDoneInTUI bool                   `json:"hide_done_in_tui,omitempty"`
+	Folders       map[string]folderTodos `json:"folders,omitempty"`
+
+	// Dir is the folder this view belongs to; empty means the global list.
+	Dir string `json:"-"`
+}
+
+type scopeMode int
+
+const (
+	scopeAuto scopeMode = iota
+	scopeGlobal
+	scopeLocal
+)
 
 type addPosition int
 
@@ -59,6 +78,7 @@ const (
 	actionDelete
 	actionHelp
 	actionInstallSkill
+	actionRemoveLocal
 )
 
 type runOptions struct {
@@ -68,10 +88,17 @@ type runOptions struct {
 	sawPosition bool
 	deleteIndex int
 	plain       bool
+	scope       scopeMode
 }
 
 type storeLocation struct {
 	Path string
+	// Dir is the current working directory, the key of the local section.
+	Dir string
+	// Local is true when the active list is the folder-scoped one.
+	Local bool
+	// HasLocal is true when the file already has a section for Dir.
+	HasLocal bool
 }
 
 const skillMD = `---
@@ -95,6 +122,11 @@ td -p -la                 # list all (incl. done)
 
 # Delete
 td -p -d 1                # delete todo #1
+
+# Scope
+td -p -L -l               # use this folder's local list (created on first add)
+td -p -g -l               # force the global list
+td -p --remove-local      # delete this folder's local list (no confirmation)
 ` + "```" + `
 
 ## Plain output format
@@ -109,12 +141,15 @@ No ANSI codes, no timestamps. Numbers are stable within a session — use ` + "`
 
 ## Storage
 
-- ` + "`" + `~/Library/Application Support/td/todos.json` + "`" + `
+- ` + "`" + `~/Library/Application Support/td/todos.json` + "`" + ` holds the global list and all folder-local lists
+- Without a scope flag, td uses the local list if the current folder already has one, otherwise the global list
+- ` + "`" + `-L` + "`" + ` forces the local list of the current folder (section is created by the first add); ` + "`" + `-g` + "`" + ` forces global
 
 ## Gotchas
 
 - ` + "`" + `td` + "`" + ` with no action → blocking TUI. Always pair with ` + "`" + `-l` + "`" + `, ` + "`" + `-la` + "`" + `, ` + "`" + `-d N` + "`" + `, or a positional arg.
 - Without ` + "`" + `-p` + "`" + `: ANSI color codes + timestamps in output → breaks grep/parsing.
+- Output does not say which list was used. Pass ` + "`" + `-g` + "`" + ` or ` + "`" + `-L` + "`" + ` explicitly when the scope matters.
 `
 
 func runInstallSkill() error {
@@ -157,7 +192,11 @@ func run(args []string) error {
 		return runInstallSkill()
 	}
 
-	s, location, err := loadStore()
+	if opts.action == actionRemoveLocal {
+		return runRemoveLocal()
+	}
+
+	s, location, err := loadStore(opts.scope)
 	if err != nil {
 		return err
 	}
@@ -174,6 +213,23 @@ func run(args []string) error {
 	default:
 		return runInteractive(s, location)
 	}
+}
+
+func runRemoveLocal() error {
+	dir, err := currentDir()
+	if err != nil {
+		return err
+	}
+	removed, err := removeLocalStore(globalDataPath(), dir)
+	if err != nil {
+		return err
+	}
+	if !removed {
+		fmt.Printf("no local list for %s\n", dir)
+		return nil
+	}
+	fmt.Printf("removed local list for %s\n", dir)
+	return nil
 }
 
 func parseArgs(args []string) (runOptions, error) {
@@ -258,6 +314,21 @@ func parseArgs(args []string) (runOptions, error) {
 			opts.action = actionInstallSkill
 		case "-p", "--plain":
 			opts.plain = true
+		case "--remove-local":
+			if opts.action != actionInteractive || len(opts.addArgs) > 0 || opts.sawPosition {
+				return runOptions{}, errors.New("remove-local flag cannot be combined with other action flags or todo text")
+			}
+			opts.action = actionRemoveLocal
+		case "-g", "--global":
+			if opts.scope == scopeLocal {
+				return runOptions{}, errors.New("global and local flags cannot be combined")
+			}
+			opts.scope = scopeGlobal
+		case "-L", "--local":
+			if opts.scope == scopeGlobal {
+				return runOptions{}, errors.New("global and local flags cannot be combined")
+			}
+			opts.scope = scopeLocal
 		default:
 			if strings.HasPrefix(arg, "-") {
 				return runOptions{}, fmt.Errorf("unknown flag: %s", arg)
@@ -278,6 +349,10 @@ func parseArgs(args []string) (runOptions, error) {
 
 	if len(opts.addArgs) > 0 || opts.sawPosition {
 		opts.action = actionAdd
+	}
+
+	if opts.action == actionRemoveLocal && opts.scope != scopeAuto {
+		return runOptions{}, errors.New("remove-local flag cannot be combined with global or local flags")
 	}
 
 	return opts, nil
@@ -359,6 +434,10 @@ func printTodos(s store, showAll bool, plain bool, location storeLocation) error
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("Todo:"))
 	b.WriteString("\n")
+	if location.Local {
+		b.WriteString(subtitleStyle.Render("local: " + location.Dir))
+		b.WriteString("\n")
+	}
 	b.WriteString("\n")
 	now := time.Now()
 	listWidth := 0
@@ -434,6 +513,9 @@ func printHelp() {
 	fmt.Printf("  %s -l              list open todos\n", cmd)
 	fmt.Printf("  %s -la             list all todos\n", cmd)
 	fmt.Printf("  %s -d 2            delete open todo #2\n", cmd)
+	fmt.Printf("  %s -L [...]        use this folder's local list (created on first add)\n", cmd)
+	fmt.Printf("  %s -g [...]        use the global list\n", cmd)
+	fmt.Printf("  %s --remove-local  delete this folder's local list\n", cmd)
 	fmt.Printf("  %s -p -l           plain output (no colors/timestamps)\n", cmd)
 	fmt.Printf("  %s --install-skill install Claude Code skill via npx skills\n", cmd)
 	fmt.Println()
@@ -456,9 +538,13 @@ func printHelp() {
 	fmt.Println("  l        open link(s) in item")
 	fmt.Println("  h        hide done")
 	fmt.Println("  w        wrap text")
+	fmt.Println("  ctrl+l   switch to this folder's local list")
+	fmt.Println("  ctrl+g   switch to the global list")
+	fmt.Println("  ctrl+x   remove this folder's local list (asks to confirm)")
 	fmt.Println("  q        quit")
 	fmt.Println()
 	fmt.Printf("Data file: %s\n", globalDataPath())
+	fmt.Println("Without -g/-L, the local list is used if this folder already has one.")
 }
 
 func commandName() string {
@@ -477,31 +563,103 @@ func globalDataPath() string {
 	return filepath.Join(base, "td", "todos.json")
 }
 
-func loadStore() (store, storeLocation, error) {
-	location := storeLocation{Path: globalDataPath()}
+func currentDir() (string, error) {
+	dir, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("resolve current directory: %w", err)
+	}
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = resolved
+	}
+	return dir, nil
+}
 
-	data, err := os.ReadFile(location.Path)
+func readStoreFile(path string) (store, error) {
+	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return store{}, location, nil
+			return store{}, nil
 		}
-		return store{}, storeLocation{}, fmt.Errorf("read todos: %w", err)
+		return store{}, fmt.Errorf("read todos: %w", err)
 	}
 
 	var s store
 	if err := json.Unmarshal(data, &s); err != nil {
-		return store{}, storeLocation{}, fmt.Errorf("parse todos: %w", err)
+		return store{}, fmt.Errorf("parse todos: %w", err)
 	}
-
-	return s, location, nil
+	return s, nil
 }
 
+func loadStore(mode scopeMode) (store, storeLocation, error) {
+	dir, err := currentDir()
+	if err != nil {
+		return store{}, storeLocation{}, err
+	}
+	return loadStoreAt(globalDataPath(), dir, mode)
+}
+
+func loadStoreAt(path, dir string, mode scopeMode) (store, storeLocation, error) {
+	file, err := readStoreFile(path)
+	if err != nil {
+		return store{}, storeLocation{}, err
+	}
+
+	folder, hasLocal := file.Folders[dir]
+	local := mode == scopeLocal || (mode == scopeAuto && hasLocal)
+	location := storeLocation{Path: path, Dir: dir, Local: local, HasLocal: hasLocal}
+
+	if local {
+		return store{Items: folder.Items, HideDoneInTUI: file.HideDoneInTUI, Dir: dir}, location, nil
+	}
+	file.Folders = nil
+	return file, location, nil
+}
+
+// saveStore writes one scope's view back into the shared file, leaving the
+// other scopes as they are on disk.
 func saveStore(path string, s store) error {
+	file, err := readStoreFile(path)
+	if err != nil {
+		return err
+	}
+
+	file.HideDoneInTUI = s.HideDoneInTUI
+	if s.Dir != "" {
+		if file.Folders == nil {
+			file.Folders = map[string]folderTodos{}
+		}
+		items := s.Items
+		if items == nil {
+			items = []todo{}
+		}
+		file.Folders[s.Dir] = folderTodos{Items: items}
+	} else {
+		file.Items = s.Items
+	}
+
+	return writeStoreFile(path, file)
+}
+
+// removeLocalStore drops the folder's section and reports whether one existed.
+func removeLocalStore(path, dir string) (bool, error) {
+	file, err := readStoreFile(path)
+	if err != nil {
+		return false, err
+	}
+	if _, ok := file.Folders[dir]; !ok {
+		return false, nil
+	}
+
+	delete(file.Folders, dir)
+	return true, writeStoreFile(path, file)
+}
+
+func writeStoreFile(path string, file store) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("create config dir: %w", err)
 	}
 
-	data, err := json.MarshalIndent(s, "", "  ")
+	data, err := json.MarshalIndent(file, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode todos: %w", err)
 	}
@@ -514,28 +672,31 @@ func saveStore(path string, s store) error {
 }
 
 type keyMap struct {
-	Up        key.Binding
-	Down      key.Binding
-	Top       key.Binding
-	Bottom    key.Binding
-	MoveUp    key.Binding
-	MoveDown  key.Binding
-	EditStart key.Binding
-	EditEnd   key.Binding
-	OpenBelow key.Binding
-	OpenAbove key.Binding
-	Toggle    key.Binding
-	Delete    key.Binding
-	ClearDone key.Binding
-	ToggleAll key.Binding
-	Quit      key.Binding
-	Cancel    key.Binding
-	Help      key.Binding
-	WrapText  key.Binding
-	Yank      key.Binding
-	Paste     key.Binding
-	OpenLinks key.Binding
-	width     int
+	Up          key.Binding
+	Down        key.Binding
+	Top         key.Binding
+	Bottom      key.Binding
+	MoveUp      key.Binding
+	MoveDown    key.Binding
+	EditStart   key.Binding
+	EditEnd     key.Binding
+	OpenBelow   key.Binding
+	OpenAbove   key.Binding
+	Toggle      key.Binding
+	Delete      key.Binding
+	ClearDone   key.Binding
+	ToggleAll   key.Binding
+	Quit        key.Binding
+	Cancel      key.Binding
+	Help        key.Binding
+	WrapText    key.Binding
+	Yank        key.Binding
+	Paste       key.Binding
+	OpenLinks   key.Binding
+	Local       key.Binding
+	Global      key.Binding
+	RemoveLocal key.Binding
+	width       int
 }
 
 func (k keyMap) ShortHelp() []key.Binding {
@@ -546,25 +707,25 @@ func (k keyMap) FullHelp() [][]key.Binding {
 	switch {
 	case k.width > 0 && k.width < 58:
 		return [][]key.Binding{
-			{k.Up, k.Down, k.Top, k.Bottom, k.EditStart, k.EditEnd, k.OpenBelow, k.OpenAbove, k.Toggle, k.Delete, k.ClearDone, k.MoveUp, k.MoveDown, k.ToggleAll, k.WrapText, k.Yank, k.Paste, k.OpenLinks, k.Help, k.Cancel, k.Quit},
+			{k.Up, k.Down, k.Top, k.Bottom, k.EditStart, k.EditEnd, k.OpenBelow, k.OpenAbove, k.Toggle, k.Delete, k.ClearDone, k.MoveUp, k.MoveDown, k.ToggleAll, k.WrapText, k.Yank, k.Paste, k.OpenLinks, k.Local, k.Global, k.RemoveLocal, k.Help, k.Cancel, k.Quit},
 		}
 	case k.width < 82:
 		return [][]key.Binding{
 			{k.Up, k.Down, k.Top, k.Bottom, k.EditStart, k.EditEnd, k.OpenBelow, k.OpenAbove, k.Cancel},
-			{k.Toggle, k.Delete, k.ClearDone, k.MoveUp, k.MoveDown, k.ToggleAll, k.WrapText, k.Yank, k.Paste, k.OpenLinks, k.Help, k.Quit},
+			{k.Toggle, k.Delete, k.ClearDone, k.MoveUp, k.MoveDown, k.ToggleAll, k.WrapText, k.Yank, k.Paste, k.OpenLinks, k.Local, k.Global, k.RemoveLocal, k.Help, k.Quit},
 		}
 	case k.width < 105:
 		return [][]key.Binding{
 			{k.Up, k.Down, k.Top, k.Bottom},
 			{k.EditStart, k.EditEnd, k.OpenBelow, k.OpenAbove, k.Cancel, k.Quit},
-			{k.Toggle, k.Delete, k.ClearDone, k.MoveUp, k.MoveDown, k.ToggleAll, k.WrapText, k.Yank, k.Paste, k.OpenLinks, k.Help},
+			{k.Toggle, k.Delete, k.ClearDone, k.MoveUp, k.MoveDown, k.ToggleAll, k.WrapText, k.Yank, k.Paste, k.OpenLinks, k.Local, k.Global, k.RemoveLocal, k.Help},
 		}
 	case k.width < 130:
 		return [][]key.Binding{
 			{k.Up, k.Down, k.Top, k.Bottom},
 			{k.EditStart, k.EditEnd, k.OpenBelow, k.OpenAbove},
 			{k.Toggle, k.Delete, k.ClearDone, k.MoveUp, k.MoveDown},
-			{k.ToggleAll, k.WrapText, k.Yank, k.Paste, k.OpenLinks, k.Help, k.Cancel, k.Quit},
+			{k.ToggleAll, k.WrapText, k.Yank, k.Paste, k.OpenLinks, k.Local, k.Global, k.RemoveLocal, k.Help, k.Cancel, k.Quit},
 		}
 	default:
 		return [][]key.Binding{
@@ -572,7 +733,7 @@ func (k keyMap) FullHelp() [][]key.Binding {
 			{k.EditStart, k.EditEnd, k.OpenBelow, k.OpenAbove},
 			{k.Toggle, k.Delete, k.ClearDone, k.MoveUp},
 			{k.MoveDown, k.ToggleAll, k.WrapText, k.Help},
-			{k.Yank, k.Paste, k.OpenLinks, k.Cancel, k.Quit},
+			{k.Yank, k.Paste, k.OpenLinks, k.Local, k.Global, k.RemoveLocal, k.Cancel, k.Quit},
 		}
 	}
 }
@@ -662,6 +823,18 @@ var keys = keyMap{
 		key.WithKeys("l"),
 		key.WithHelp("l", "open link(s)"),
 	),
+	Local: key.NewBinding(
+		key.WithKeys("ctrl+l"),
+		key.WithHelp("ctrl+l", "local list"),
+	),
+	RemoveLocal: key.NewBinding(
+		key.WithKeys("ctrl+x"),
+		key.WithHelp("ctrl+x", "remove local list"),
+	),
+	Global: key.NewBinding(
+		key.WithKeys("ctrl+g"),
+		key.WithHelp("ctrl+g", "global list"),
+	),
 }
 
 type model struct {
@@ -670,22 +843,23 @@ type model struct {
 	cursor              int
 	showAll             bool
 	directionalNewItem  int
-	help                  help.Model
-	showHelp              bool
-	editMode              editMode
-	input                 string
-	inputCursor           int
-	insertAt              int
-	editIndex             int
-	pendingG              bool
+	help                help.Model
+	showHelp            bool
+	editMode            editMode
+	input               string
+	inputCursor         int
+	insertAt            int
+	editIndex           int
+	pendingG            bool
+	confirmRemoveLocal  bool
 	animatingDoneIndex  int
 	animatingDoneFrames int
-	yankAnimatingIndex    int
-	yankAnimatingFrames   int
-	err                   error
-	width                 int
-	height                int
-	wrapText              bool
+	yankAnimatingIndex  int
+	yankAnimatingFrames int
+	err                 error
+	width               int
+	height              int
+	wrapText            bool
 }
 
 func newModel(s store, location storeLocation) model {
@@ -777,6 +951,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
+		}
+
+		if m.confirmRemoveLocal {
+			m.confirmRemoveLocal = false
+			if msg.String() == "y" {
+				if err := m.removeLocal(); err != nil {
+					m.err = err
+					return m, tea.Quit
+				}
+			}
+			return m, nil
 		}
 
 		switch {
@@ -893,6 +1078,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, keys.OpenLinks):
 			m.pendingG = false
 			return m, m.openLinksInCurrent()
+		case key.Matches(msg, keys.Local):
+			m.pendingG = false
+			if err := m.switchScope(scopeLocal); err != nil {
+				m.err = err
+				return m, tea.Quit
+			}
+		case key.Matches(msg, keys.RemoveLocal):
+			m.pendingG = false
+			m.confirmRemoveLocal = m.location.Local
+		case key.Matches(msg, keys.Global):
+			m.pendingG = false
+			if err := m.switchScope(scopeGlobal); err != nil {
+				m.err = err
+				return m, tea.Quit
+			}
 		default:
 			m.pendingG = false
 		}
@@ -1169,9 +1369,9 @@ func truncateStyledText(text string, width int) string {
 	if width <= 1 {
 		return lipgloss.NewStyle().MaxWidth(width).Inline(true).Render("…")
 	}
-	visible := lipgloss.NewStyle().MaxWidth(width-1).Inline(true).Render(text)
+	visible := lipgloss.NewStyle().MaxWidth(width - 1).Inline(true).Render(text)
 	for lipgloss.Width(visible) > width-1 {
-		visible = lipgloss.NewStyle().MaxWidth(lipgloss.Width(visible)-1).Inline(true).Render(visible)
+		visible = lipgloss.NewStyle().MaxWidth(lipgloss.Width(visible) - 1).Inline(true).Render(visible)
 	}
 	return visible + "…"
 }
@@ -1302,7 +1502,7 @@ func (m model) contentWidth() int {
 	width := m.width - 4
 	if width < 0 {
 		return 0
-}
+	}
 	return width
 }
 
@@ -1535,6 +1735,41 @@ func (m model) openLinksInCurrent() tea.Cmd {
 	}
 }
 
+func (m *model) switchScope(mode scopeMode) error {
+	if m.location.Local == (mode == scopeLocal) {
+		return nil
+	}
+
+	dir := m.location.Dir
+	if dir == "" {
+		var err error
+		if dir, err = currentDir(); err != nil {
+			return err
+		}
+	}
+
+	s, location, err := loadStoreAt(m.location.Path, dir, mode)
+	if err != nil {
+		return err
+	}
+
+	m.store = s
+	m.location = location
+	m.cursor = 0
+	m.animatingDoneIndex = -1
+	m.animatingDoneFrames = 0
+	m.showAll = !s.HideDoneInTUI
+	return nil
+}
+
+// removeLocal deletes the folder's section and falls back to the global list.
+func (m *model) removeLocal() error {
+	if _, err := removeLocalStore(m.location.Path, m.location.Dir); err != nil {
+		return err
+	}
+	return m.switchScope(scopeGlobal)
+}
+
 func (m *model) moveCurrent(delta int) error {
 	visible := m.visibleIndexes()
 	if len(visible) == 0 {
@@ -1573,7 +1808,22 @@ func (m model) statusLine() string {
 		mode = "showing open"
 	}
 
-	return fmt.Sprintf("%d open, %d done • %s", open, done, mode)
+	scope := "global"
+	if m.location.Local {
+		scope = "local: " + m.location.Dir
+	}
+
+	status := fmt.Sprintf("%d open, %d done • %s • %s", open, done, mode, scope)
+	if !m.location.Local && !m.location.HasLocal && m.location.Dir != "" {
+		status += "\nNo list for this folder yet. Press ctrl+l to create one."
+	}
+	if m.location.Local && len(m.store.Items) == 0 && !m.confirmRemoveLocal {
+		status += "\nThis local list is empty. Press ctrl+x to remove it, ctrl+g for the global list."
+	}
+	if m.confirmRemoveLocal {
+		status += "\nRemove this folder's local list and all its todos? Press y to confirm, any other key cancels."
+	}
+	return status
 }
 
 var (
@@ -1589,14 +1839,14 @@ var (
 			Background(accent).
 			Padding(0, 1)
 
-	subtitleStyle = lipgloss.NewStyle().Foreground(muted)
-	mutedStyle    = lipgloss.NewStyle().Foreground(muted)
+	subtitleStyle  = lipgloss.NewStyle().Foreground(muted)
+	mutedStyle     = lipgloss.NewStyle().Foreground(muted)
 	timestampStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("242"))
-	accentStyle   = lipgloss.NewStyle().Foreground(accent).Bold(true)
-	openBoxStyle  = lipgloss.NewStyle().Foreground(accent)
-	doneBoxStyle  = lipgloss.NewStyle().Foreground(doneColor)
-	doneTextStyle = lipgloss.NewStyle().Foreground(doneColor).Strikethrough(true)
-	selectedStyle = lipgloss.NewStyle().
+	accentStyle    = lipgloss.NewStyle().Foreground(accent).Bold(true)
+	openBoxStyle   = lipgloss.NewStyle().Foreground(accent)
+	doneBoxStyle   = lipgloss.NewStyle().Foreground(doneColor)
+	doneTextStyle  = lipgloss.NewStyle().Foreground(doneColor).Strikethrough(true)
+	selectedStyle  = lipgloss.NewStyle().
 			Foreground(foreground).
 			Background(background)
 )

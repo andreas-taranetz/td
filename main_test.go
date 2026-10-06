@@ -646,3 +646,159 @@ func TestTaskTimestampText(t *testing.T) {
 		t.Fatalf("done timestamp = %q, want %q", got, "done yesterday 18:45")
 	}
 }
+
+func TestLocalScopeIsStoredInGlobalFileAndIsolated(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "todos.json")
+	dir := "/work/project"
+
+	global := store{Items: []todo{{Description: "global item"}}}
+	if err := saveStore(path, global); err != nil {
+		t.Fatal(err)
+	}
+
+	local, location, err := loadStoreAt(path, dir, scopeLocal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !location.Local || location.HasLocal || len(local.Items) != 0 {
+		t.Fatalf("unexpected fresh local view: %+v %+v", location, local)
+	}
+
+	local.Items = append(local.Items, todo{Description: "local item"})
+	if err := saveStore(path, local); err != nil {
+		t.Fatal(err)
+	}
+
+	auto, location, err := loadStoreAt(path, dir, scopeAuto)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !location.Local || len(auto.Items) != 1 || auto.Items[0].Description != "local item" {
+		t.Fatalf("auto should pick local section, got %+v", auto)
+	}
+
+	other, location, err := loadStoreAt(path, "/elsewhere", scopeAuto)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if location.Local || len(other.Items) != 1 || other.Items[0].Description != "global item" {
+		t.Fatalf("other folder should stay global, got %+v", other)
+	}
+
+	forcedGlobal, location, err := loadStoreAt(path, dir, scopeGlobal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if location.Local || !location.HasLocal || forcedGlobal.Items[0].Description != "global item" {
+		t.Fatalf("forced global should ignore local section, got %+v", forcedGlobal)
+	}
+
+	// Writing the global list must not drop the local section.
+	forcedGlobal.Items = append(forcedGlobal.Items, todo{Description: "second global"})
+	if err := saveStore(path, forcedGlobal); err != nil {
+		t.Fatal(err)
+	}
+	again, _, err := loadStoreAt(path, dir, scopeLocal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(again.Items) != 1 || again.Items[0].Description != "local item" {
+		t.Fatalf("local section lost after global save: %+v", again)
+	}
+}
+
+func TestSwitchScopeInModel(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "todos.json")
+	dir := "/work/project"
+	if err := saveStore(path, store{Items: []todo{{Description: "g"}}}); err != nil {
+		t.Fatal(err)
+	}
+
+	s, location, err := loadStoreAt(path, dir, scopeAuto)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := newModel(s, location)
+
+	if err := m.switchScope(scopeLocal); err != nil {
+		t.Fatal(err)
+	}
+	if !m.location.Local || len(m.store.Items) != 0 {
+		t.Fatalf("expected empty local view, got %+v", m.location)
+	}
+	if err := m.switchScope(scopeGlobal); err != nil {
+		t.Fatal(err)
+	}
+	if m.location.Local || len(m.store.Items) != 1 {
+		t.Fatalf("expected global view, got %+v", m.location)
+	}
+}
+
+func TestParseArgsScopeFlags(t *testing.T) {
+	opts, err := parseArgs([]string{"-L", "-l"})
+	if err != nil || opts.scope != scopeLocal {
+		t.Fatalf("got %+v, %v", opts, err)
+	}
+	opts, err = parseArgs([]string{"--global", "text"})
+	if err != nil || opts.scope != scopeGlobal || opts.action != actionAdd {
+		t.Fatalf("got %+v, %v", opts, err)
+	}
+	if _, err := parseArgs([]string{"-g", "-L"}); err == nil {
+		t.Fatal("expected conflict error")
+	}
+}
+
+func TestRemoveLocalStoreKeepsOtherScopes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "todos.json")
+	dir := "/work/project"
+	if err := saveStore(path, store{Items: []todo{{Description: "g"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveStore(path, store{Dir: dir, Items: []todo{{Description: "l"}}}); err != nil {
+		t.Fatal(err)
+	}
+
+	removed, err := removeLocalStore(path, dir)
+	if err != nil || !removed {
+		t.Fatalf("removed=%v err=%v", removed, err)
+	}
+	if removed, _ := removeLocalStore(path, dir); removed {
+		t.Fatal("second removal should report nothing removed")
+	}
+
+	s, location, err := loadStoreAt(path, dir, scopeAuto)
+	if err != nil || location.Local || len(s.Items) != 1 {
+		t.Fatalf("expected global fallback, got %+v %+v %v", s, location, err)
+	}
+}
+
+func TestRemoveLocalRequiresConfirmation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "todos.json")
+	dir := "/work/project"
+	m := newModel(store{Dir: dir}, storeLocation{Path: path, Dir: dir, Local: true})
+	if err := saveStore(path, m.store); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(m.statusLine(), "ctrl+x") {
+		t.Fatal("empty local list should hint at ctrl+x")
+	}
+
+	press := func(m model, k tea.KeyMsg) model {
+		next, _ := m.Update(k)
+		return next.(model)
+	}
+	m = press(m, tea.KeyMsg{Type: tea.KeyCtrlX})
+	m = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	if !m.location.Local {
+		t.Fatal("cancel must keep the local list")
+	}
+
+	m = press(m, tea.KeyMsg{Type: tea.KeyCtrlX})
+	m = press(m, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	if m.location.Local {
+		t.Fatal("confirm should switch to global")
+	}
+	if _, location, _ := loadStoreAt(path, dir, scopeAuto); location.HasLocal {
+		t.Fatal("section should be gone from file")
+	}
+}

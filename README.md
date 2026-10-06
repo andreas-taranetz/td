@@ -49,6 +49,8 @@ td -l
 td -la
 td -d 2
 td -p -l
+td -L fix bugs
+td -g -l
 ```
 
 - `td` opens interactive mode
@@ -60,6 +62,9 @@ td -p -l
 - `td -la` or `td --list-all` lists all items including done ones
 - `td -d <N>` or `td --delete <N>` deletes open item #N (matches numbering from `td -l`)
 - `td -p` or `td --plain` outputs a plain numbered list — no colors, no timestamps, no header; useful for piping or agent use
+- `td -L` or `td --local` uses the todo list of the current folder; the list is created by the first item you add
+- `td -g` or `td --global` uses the global list, even if the current folder has a local list
+- `td --remove-local` deletes the local list of the current folder (and its todos) from the file; the global list is untouched
 - `td --install-skill` installs the agent skill via `npx skills` (interactive agent selector)
 
 After non-interactive add commands, the current open todo list is printed in a formatted, colorized view.
@@ -84,6 +89,9 @@ Open-only output omits checkboxes; `-la` includes them.
 - `l`: open all URLs found in the current item in the default browser
 - `h`: toggle hidden vs visible done items and persist that preference
 - `w`: toggle text wrapping for long items
+- `Ctrl+L`: switch to the local list of the current folder (created on the first item you add)
+- `Ctrl+G`: switch to the global list
+- `Ctrl+X`: remove the current folder's local list after a `y` confirmation (an empty local list shows a hint for this)
 - `?`: expand help
 - `Esc`: cancel editing or add mode
 - `q`: quit
@@ -102,3 +110,13 @@ Writes the embedded `SKILL.md` to a temp dir and hands off to `npx skills` for a
 
 - macOS: `~/Library/Application Support/td/todos.json`
 - fallback: `.td.json`
+
+### Global and folder-local lists
+
+Folder-local lists live in the same file as the global list, in a `folders` section keyed by absolute directory path. There are no per-project files.
+
+- If the current folder already has a local list, `td` uses it automatically.
+- Otherwise `td` opens the global list and shows a hint that `Ctrl+L` creates a local list for the folder.
+- `Ctrl+L` / `Ctrl+G` switch between local and global while running. A local list is only written once you add an item.
+- `Ctrl+X` or `td --remove-local` deletes the local list again.
+- `-L` / `-g` override the automatic choice for non-interactive use. Only the exact current folder matches, not its parents.
