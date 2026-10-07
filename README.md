@@ -43,7 +43,7 @@ Then reload your shell.
 ```bash
 td --help
 td
-td add vibe features
+td vibe code features
 td -t fix bugs
 td -l
 td -la
@@ -85,6 +85,7 @@ Open-only output omits checkboxes; `-la` includes them.
 - `K` or `Shift+Up`: move selected item up
 - `d`: delete the selected item
 - `D`: delete all done items
+- `u` / `Ctrl+R`: undo / redo the last change (up to 50 steps, also in the overview); a message shows what was undone, or that nothing is left. The history is cleared when you switch lists or enter/leave the overview
 - `y`: yank (copy) the current item's text to the clipboard — the line flashes to confirm
 - `p`: paste clipboard text as a new item below the cursor
 - `l`: open all URLs found in the current item in the default browser

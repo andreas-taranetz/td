@@ -573,6 +573,8 @@ func printHelp() {
 	fmt.Println("  x/enter  toggle done")
 	fmt.Println("  d        delete item")
 	fmt.Println("  D        delete all done")
+	fmt.Println("  u        undo last change")
+	fmt.Println("  ctrl+r   redo")
 	fmt.Println("  y        yank/copy item to clipboard")
 	fmt.Println("  p        paste clipboard as new item below")
 	fmt.Println("  l        open link(s) in item")
@@ -778,6 +780,8 @@ type keyMap struct {
 	Global      key.Binding
 	RemoveLocal key.Binding
 	Overview    key.Binding
+	Undo        key.Binding
+	Redo        key.Binding
 	width       int
 }
 
@@ -789,31 +793,31 @@ func (k keyMap) FullHelp() [][]key.Binding {
 	switch {
 	case k.width > 0 && k.width < 58:
 		return [][]key.Binding{
-			{k.Up, k.Down, k.Top, k.Bottom, k.EditStart, k.EditEnd, k.OpenBelow, k.OpenAbove, k.Toggle, k.Delete, k.ClearDone, k.MoveUp, k.MoveDown, k.ToggleAll, k.WrapText, k.Yank, k.Paste, k.OpenLinks, k.Local, k.Global, k.Overview, k.RemoveLocal, k.Help, k.Cancel, k.Quit},
+			{k.Up, k.Down, k.Top, k.Bottom, k.EditStart, k.EditEnd, k.OpenBelow, k.OpenAbove, k.Toggle, k.Delete, k.ClearDone, k.MoveUp, k.MoveDown, k.ToggleAll, k.WrapText, k.Yank, k.Paste, k.OpenLinks, k.Local, k.Global, k.Overview, k.RemoveLocal, k.Undo, k.Redo, k.Help, k.Cancel, k.Quit},
 		}
 	case k.width < 82:
 		return [][]key.Binding{
 			{k.Up, k.Down, k.Top, k.Bottom, k.EditStart, k.EditEnd, k.OpenBelow, k.OpenAbove, k.Cancel, k.Toggle, k.Delete, k.ClearDone},
-			{k.MoveUp, k.MoveDown, k.ToggleAll, k.WrapText, k.Yank, k.Paste, k.OpenLinks, k.Local, k.Global, k.Overview, k.RemoveLocal, k.Help, k.Quit},
+			{k.MoveUp, k.MoveDown, k.ToggleAll, k.WrapText, k.Yank, k.Paste, k.OpenLinks, k.Local, k.Global, k.Overview, k.RemoveLocal, k.Undo, k.Redo, k.Help, k.Quit},
 		}
 	case k.width < 105:
 		return [][]key.Binding{
 			{k.Up, k.Down, k.Top, k.Bottom, k.EditStart, k.EditEnd, k.OpenBelow, k.OpenAbove},
-			{k.Toggle, k.Delete, k.ClearDone, k.MoveUp, k.MoveDown, k.Yank, k.Paste, k.OpenLinks},
+			{k.Toggle, k.Delete, k.ClearDone, k.MoveUp, k.MoveDown, k.Yank, k.Paste, k.OpenLinks, k.Undo, k.Redo},
 			{k.ToggleAll, k.WrapText, k.Local, k.Global, k.Overview, k.RemoveLocal, k.Help, k.Cancel, k.Quit},
 		}
 	case k.width < 130:
 		return [][]key.Binding{
 			{k.Up, k.Down, k.Top, k.Bottom, k.Help, k.Cancel, k.Quit},
 			{k.EditStart, k.EditEnd, k.OpenBelow, k.OpenAbove, k.Yank, k.Paste},
-			{k.Toggle, k.Delete, k.ClearDone, k.MoveUp, k.MoveDown, k.OpenLinks},
+			{k.Toggle, k.Delete, k.ClearDone, k.MoveUp, k.MoveDown, k.OpenLinks, k.Undo, k.Redo},
 			{k.ToggleAll, k.WrapText, k.Local, k.Global, k.Overview, k.RemoveLocal},
 		}
 	default:
 		return [][]key.Binding{
 			{k.Up, k.Down, k.Top, k.Bottom, k.Help},
 			{k.EditStart, k.EditEnd, k.OpenBelow, k.OpenAbove, k.Cancel},
-			{k.Toggle, k.Delete, k.ClearDone, k.MoveUp, k.MoveDown},
+			{k.Toggle, k.Delete, k.ClearDone, k.MoveUp, k.MoveDown, k.Undo, k.Redo},
 			{k.ToggleAll, k.WrapText, k.Yank, k.Paste, k.OpenLinks},
 			{k.Local, k.Global, k.Overview, k.RemoveLocal, k.Quit},
 		}
@@ -910,6 +914,8 @@ var keys = keyMap{
 		key.WithHelp("ctrl+l", "show local"),
 	),
 	Overview: overviewKey,
+	Undo:     undoKey,
+	Redo:     redoKey,
 	RemoveLocal: key.NewBinding(
 		key.WithKeys("ctrl+x"),
 		key.WithHelp("ctrl+x", "remove local list"),
@@ -951,6 +957,8 @@ type model struct {
 	width               int
 	height              int
 	wrapText            bool
+	history             history
+	notice              string
 }
 
 func newModel(s store, location storeLocation) model {
@@ -1000,6 +1008,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.yankAnimatingIndex = -1
 		}
 	case tea.KeyMsg:
+		m.notice = ""
 		if m.overview && !m.isEditing() {
 			return m.updateOverview(msg)
 		}
@@ -1178,6 +1187,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.err = err
 				return m, tea.Quit
 			}
+		case key.Matches(msg, keys.Undo):
+			m.pendingG = false
+			if err := m.undo(); err != nil {
+				m.err = err
+				return m, tea.Quit
+			}
+		case key.Matches(msg, keys.Redo):
+			m.pendingG = false
+			if err := m.redo(); err != nil {
+				m.err = err
+				return m, tea.Quit
+			}
 		case key.Matches(msg, keys.Overview):
 			m.pendingG = false
 			if err := m.enterOverview(); err != nil {
@@ -1209,6 +1230,7 @@ func (m model) View() string {
 	b.WriteString(titleStyle.Render(m.location.title(m.width)))
 	b.WriteString("\n")
 	b.WriteString(subtitleStyle.Render(m.statusLine()))
+	b.WriteString(m.noticeLine())
 	b.WriteString("\n\n")
 
 	if len(m.store.Items) == 0 {
@@ -1343,6 +1365,9 @@ func (m *model) clampCursor() {
 }
 
 func (m *model) toggleCurrent() (tea.Cmd, error) {
+	if err := m.reload(); err != nil {
+		return nil, err
+	}
 	visible := m.visibleIndexes()
 	if len(visible) == 0 {
 		return nil, nil
@@ -1350,6 +1375,11 @@ func (m *model) toggleCurrent() (tea.Cmd, error) {
 
 	idx := visible[m.cursor]
 	wasDone := m.store.Items[idx].Done
+	verb := "complete"
+	if wasDone {
+		verb = "reopen"
+	}
+	m.recordUndo(verb + " " + quoted(m.store.Items[idx].Description))
 	m.store.Items[idx].Done = !m.store.Items[idx].Done
 	if m.store.Items[idx].Done {
 		m.store.Items[idx].DoneAt = time.Now()
@@ -1789,7 +1819,11 @@ func (m *model) pasteFromClipboard() error {
 		return nil
 	}
 	text = strings.TrimSpace(text)
+	if err := m.reload(); err != nil {
+		return err
+	}
 	insertAt := m.currentInsertIndex(true)
+	m.recordUndo("paste " + quoted(text))
 	newItem := todo{Description: text, CreatedAt: time.Now()}
 	m.store.Items = append(m.store.Items, todo{})
 	copy(m.store.Items[insertAt+1:], m.store.Items[insertAt:])
@@ -1868,6 +1902,7 @@ func (m *model) switchScope(mode scopeMode) error {
 
 	m.store = s
 	m.location = location
+	m.clearHistory()
 	m.cursor = 0
 	m.animatingDoneIndex = -1
 	m.animatingDoneFrames = 0
@@ -1884,6 +1919,9 @@ func (m *model) removeLocal() error {
 }
 
 func (m *model) moveCurrent(delta int) error {
+	if err := m.reload(); err != nil {
+		return err
+	}
 	visible := m.visibleIndexes()
 	if len(visible) == 0 {
 		return nil
@@ -1896,6 +1934,7 @@ func (m *model) moveCurrent(delta int) error {
 	}
 	to := visible[toCursor]
 
+	m.recordUndo("move " + quoted(m.store.Items[from].Description))
 	m.store.Items[from], m.store.Items[to] = m.store.Items[to], m.store.Items[from]
 	if err := saveStore(m.location.Path, m.store); err != nil {
 		return err
@@ -1983,7 +2022,11 @@ func (m *model) commitInput() error {
 	if description == "" {
 		return nil
 	}
+	if err := m.reload(); err != nil {
+		return err
+	}
 	if m.editMode == editModeCurrent && m.editIndex >= 0 && m.editIndex < len(m.store.Items) {
+		m.recordUndo("edit " + quoted(description))
 		m.store.Items[m.editIndex].Description = description
 		if err := saveStore(m.location.Path, m.store); err != nil {
 			return err
@@ -2004,6 +2047,7 @@ func (m *model) commitInput() error {
 		insertAt = len(m.store.Items)
 	}
 
+	m.recordUndo("add " + quoted(description))
 	m.store.Items = append(m.store.Items, todo{})
 	copy(m.store.Items[insertAt+1:], m.store.Items[insertAt:])
 	m.store.Items[insertAt] = newTodo
@@ -2113,12 +2157,16 @@ func (m model) editModeHelp() string {
 }
 
 func (m *model) deleteCurrent() error {
+	if err := m.reload(); err != nil {
+		return err
+	}
 	visible := m.visibleIndexes()
 	if len(visible) == 0 {
 		return nil
 	}
 
 	idx := visible[m.cursor]
+	m.recordUndo("delete " + quoted(m.store.Items[idx].Description))
 	m.store.Items = append(m.store.Items[:idx], m.store.Items[idx+1:]...)
 	if err := saveStore(m.location.Path, m.store); err != nil {
 		return err
@@ -2129,6 +2177,14 @@ func (m *model) deleteCurrent() error {
 }
 
 func (m *model) clearArchived() error {
+	if err := m.reload(); err != nil {
+		return err
+	}
+	if open, _ := countTodos(m.store.Items); open == len(m.store.Items) {
+		return nil
+	}
+	m.recordUndo("delete all done")
+
 	items := m.store.Items[:0]
 	for _, item := range m.store.Items {
 		if item.Done {

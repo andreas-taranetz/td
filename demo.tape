@@ -90,6 +90,16 @@ Sleep 600ms
 Type "x"
 Sleep 800ms
 
+# Undo the toggle (u), redo it (ctrl+r), then delete an item and bring it back
+Type "u"
+Sleep 1200ms
+Ctrl+R
+Sleep 1200ms
+Type "d"
+Sleep 700ms
+Type "u"
+Sleep 1200ms
+
 # This folder has no local list yet: the status line hints at ctrl+l
 Sleep 1500ms
 

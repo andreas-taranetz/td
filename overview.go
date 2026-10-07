@@ -42,7 +42,7 @@ func (overviewKeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{keys.Up, keys.Down, keys.Top, keys.Bottom, listNextKey, listPrevKey},
 		{keys.EditStart, keys.EditEnd, keys.OpenBelow, keys.OpenAbove},
-		{keys.Toggle, keys.Delete, keys.ClearDone, keys.MoveUp, keys.MoveDown},
+		{keys.Toggle, keys.Delete, keys.ClearDone, keys.MoveUp, keys.MoveDown, keys.Undo, keys.Redo},
 		{keys.ToggleAll, keys.WrapText, keys.Yank, keys.Paste, keys.OpenLinks},
 		{keys.Local, keys.Global, overviewKey, keys.Quit},
 	}
@@ -161,6 +161,7 @@ func (m *model) enterOverview() error {
 		m.location.Dir = dir
 	}
 	m.overview = true
+	m.clearHistory()
 	m.ovCursor = 0
 	m.animatingDoneIndex, m.animatingDoneFrames = -1, 0
 	m.yankAnimatingIndex, m.yankAnimatingFrames = -1, 0
@@ -169,6 +170,7 @@ func (m *model) enterOverview() error {
 
 func (m *model) exitOverview() error {
 	m.overview = false
+	m.clearHistory()
 	m.yankAnimatingIndex, m.yankAnimatingFrames = -1, 0
 	mode := scopeGlobal
 	if m.location.Local {
@@ -222,7 +224,7 @@ func (m *model) moveOverviewCursor(delta int) {
 
 // mutateOverviewItem applies fn to the selected todo's list and writes the
 // whole file back, so the overview never works from stale data.
-func (m *model) mutateOverviewItem(fn func(items []todo, idx int) []todo) error {
+func (m *model) mutateOverviewItem(verb string, fn func(items []todo, idx int) []todo) error {
 	if m.ovCursor >= len(m.ovRows) || m.ovRows[m.ovCursor].header {
 		return nil
 	}
@@ -232,7 +234,9 @@ func (m *model) mutateOverviewItem(fn func(items []todo, idx int) []todo) error 
 	if err != nil {
 		return err
 	}
-	setSectionItems(&file, row.dir, fn(sectionItems(file, row.dir), row.idx))
+	items := sectionItems(file, row.dir)
+	m.pushUndo(row.dir, items, row.idx, verb+" "+quoted(row.item.Description))
+	setSectionItems(&file, row.dir, fn(items, row.idx))
 	if err := writeStoreFile(m.location.Path, file); err != nil {
 		return err
 	}
@@ -336,12 +340,14 @@ func (m *model) commitOverviewInput() error {
 	items := sectionItems(file, dir)
 	at := m.editIndex
 	if m.editMode == editModeCurrent && at >= 0 && at < len(items) {
+		m.pushUndo(dir, items, at, "edit "+quoted(description))
 		items[at].Description = description
 	} else {
 		at = m.insertAt
 		if at < 0 || at > len(items) {
 			at = len(items)
 		}
+		m.pushUndo(dir, items, at, "add "+quoted(description))
 		items = append(items, todo{})
 		copy(items[at+1:], items[at:])
 		items[at] = todo{Description: description, CreatedAt: time.Now()}
@@ -406,6 +412,7 @@ func (m *model) pasteOverviewItem() error {
 		at = len(items)
 	}
 
+	m.pushUndo(dir, items, at, "paste "+quoted(strings.TrimSpace(text)))
 	items = append(items, todo{})
 	copy(items[at+1:], items[at:])
 	items[at] = todo{Description: strings.TrimSpace(text), CreatedAt: time.Now()}
@@ -437,6 +444,7 @@ func (m *model) moveOverviewItem(delta int) error {
 	if row.idx >= len(items) || other.idx >= len(items) {
 		return nil
 	}
+	m.pushUndo(row.dir, items, row.idx, "move "+quoted(row.item.Description))
 	items[row.idx], items[other.idx] = items[other.idx], items[row.idx]
 	setSectionItems(&file, row.dir, items)
 	if err := writeStoreFile(m.location.Path, file); err != nil {
@@ -461,12 +469,17 @@ func (m *model) clearOverviewDone() error {
 	if err != nil {
 		return err
 	}
+	items := sectionItems(file, dir)
 	kept := []todo{}
-	for _, item := range sectionItems(file, dir) {
+	for _, item := range items {
 		if !item.Done {
 			kept = append(kept, item)
 		}
 	}
+	if len(kept) == len(items) {
+		return nil
+	}
+	m.pushUndo(dir, items, 0, "delete all done")
 	setSectionItems(&file, dir, kept)
 	if err := writeStoreFile(m.location.Path, file); err != nil {
 		return err
@@ -507,7 +520,11 @@ func (m *model) jumpList(delta int) {
 }
 
 func (m *model) toggleOverviewItem() error {
-	return m.mutateOverviewItem(func(items []todo, idx int) []todo {
+	verb := "complete"
+	if row := m.selectedRow(); row != nil && row.item.Done {
+		verb = "reopen"
+	}
+	return m.mutateOverviewItem(verb, func(items []todo, idx int) []todo {
 		if idx >= len(items) {
 			return items
 		}
@@ -521,7 +538,7 @@ func (m *model) toggleOverviewItem() error {
 }
 
 func (m *model) deleteOverviewItem() error {
-	return m.mutateOverviewItem(func(items []todo, idx int) []todo {
+	return m.mutateOverviewItem("delete", func(items []todo, idx int) []todo {
 		if idx >= len(items) {
 			return items
 		}
@@ -636,6 +653,14 @@ func (m model) updateOverview(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if err := m.deleteOverviewItem(); err != nil {
 			return fail(err)
 		}
+	case key.Matches(msg, keys.Undo):
+		if err := m.undo(); err != nil {
+			return fail(err)
+		}
+	case key.Matches(msg, keys.Redo):
+		if err := m.redo(); err != nil {
+			return fail(err)
+		}
 	}
 	return m, nil
 }
@@ -646,6 +671,7 @@ func (m model) overviewView() string {
 	b.WriteString("\n")
 
 	b.WriteString(subtitleStyle.Render(formatStatus(m.ovOpen, m.ovDone, "all", m.showAll)))
+	b.WriteString(m.noticeLine())
 	b.WriteString("\n\n")
 
 	inputRow := func() string {
