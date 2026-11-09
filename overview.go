@@ -62,7 +62,10 @@ func shortenPath(dir string) string {
 
 // buildOverview orders sections as: current folder, global, other folders.
 // Sections without visible items are left out.
-func buildOverview(file store, currentDir string, showAll bool) []ovRow {
+//
+// keep is a todo that stays listed even if hidden, so its completion animation
+// can finish before it disappears.
+func buildOverview(file store, currentDir string, showAll bool, keep *ovRow) []ovRow {
 	type section struct {
 		dir   string
 		title string
@@ -90,7 +93,8 @@ func buildOverview(file store, currentDir string, showAll bool) []ovRow {
 	for _, sec := range sections {
 		var items []ovRow
 		for i, item := range sec.items {
-			if item.Done && !showAll {
+			isKept := keep != nil && keep.dir == sec.dir && keep.idx == i
+			if item.Done && !showAll && !isKept {
 				continue
 			}
 			items = append(items, ovRow{title: sec.title, dir: sec.dir, idx: i, item: item})
@@ -141,7 +145,17 @@ func (m *model) refreshOverview() error {
 	if err != nil {
 		return err
 	}
-	m.ovRows = buildOverview(file, m.location.listDir(), m.showAll)
+	var keep *ovRow
+	if m.animatingDoneFrames > 0 {
+		keep = &m.ovAnimRow
+	}
+	m.ovRows = buildOverview(file, m.location.listDir(), m.showAll, keep)
+	m.animatingDoneIndex = -1
+	for i, r := range m.ovRows {
+		if keep != nil && !r.header && r.dir == keep.dir && r.idx == keep.idx {
+			m.animatingDoneIndex = i
+		}
+	}
 	m.ovOpen, m.ovDone = countTodos(file.Items)
 	for _, f := range file.Folders {
 		open, done := countTodos(f.Items)
@@ -519,12 +533,18 @@ func (m *model) jumpList(delta int) {
 	m.ovCursor = starts[0]
 }
 
-func (m *model) toggleOverviewItem() error {
+func (m *model) toggleOverviewItem() (tea.Cmd, error) {
 	verb := "complete"
-	if row := m.selectedRow(); row != nil && row.item.Done {
+	row := m.selectedRow()
+	completing := row != nil && !row.item.Done
+	if !completing {
 		verb = "reopen"
 	}
-	return m.mutateOverviewItem(verb, func(items []todo, idx int) []todo {
+	if completing {
+		m.ovAnimRow = *row
+		m.animatingDoneFrames = doneAnimFrames
+	}
+	err := m.mutateOverviewItem(verb, func(items []todo, idx int) []todo {
 		if idx >= len(items) {
 			return items
 		}
@@ -535,6 +555,12 @@ func (m *model) toggleOverviewItem() error {
 		}
 		return items
 	})
+	if err != nil || !completing {
+		m.animatingDoneFrames = 0
+		m.animatingDoneIndex = -1
+		return nil, err
+	}
+	return nextCompletionFrame(), nil
 }
 
 func (m *model) deleteOverviewItem() error {
@@ -646,9 +672,11 @@ func (m model) updateOverview(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return fail(err)
 		}
 	case key.Matches(msg, keys.Toggle):
-		if err := m.toggleOverviewItem(); err != nil {
+		cmd, err := m.toggleOverviewItem()
+		if err != nil {
 			return fail(err)
 		}
+		return m, cmd
 	case key.Matches(msg, keys.Delete):
 		if err := m.deleteOverviewItem(); err != nil {
 			return fail(err)

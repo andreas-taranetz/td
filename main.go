@@ -944,6 +944,7 @@ type model struct {
 	overview            bool
 	ovRows              []ovRow
 	ovCursor            int
+	ovAnimRow           ovRow
 	ovEditDir           string
 	ovEditRow           int
 	pendingBracket      string
@@ -997,6 +998,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nextCompletionFrame()
 			}
 			m.animatingDoneIndex = -1
+			if m.overview {
+				if err := m.refreshOverview(); err != nil {
+					m.notice = err.Error()
+				}
+				return m, nil
+			}
 			m.clampCursor()
 		}
 	case yankFrameMsg:
@@ -1050,7 +1057,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			default:
 				if msg.Type == tea.KeyRunes {
-					m.insertInput(msg.String())
+					// msg.String() wraps bracketed pastes in "[...]", which would end up in the todo text.
+					m.insertInput(string(msg.Runes))
 				}
 				return m, nil
 			}
